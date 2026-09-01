@@ -5,7 +5,9 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
-use serde::Deserialize;
+use dashmap::DashMap;
+use serde::ser::{SerializeMap, SerializeSeq};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::json;
 
 use crate::logs::mirror::{MirrorOutcome, extract_value, mirror_request};
@@ -35,6 +37,64 @@ fn text_status(status: StatusCode, body: impl Into<String>) -> Response {
         .headers_mut()
         .insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
     response
+}
+
+/// Serializes a `DashMap` in place, as a JSON object.
+///
+/// `/instances` and `/channels` return every channel known to every instance
+/// — a few hundred thousand entries. Collecting them into an owned map and
+/// handing that to `json!` made two further full copies before the serializer
+/// ever saw the data: a deep clone of every `Channel`, then a
+/// `serde_json::Value` tree several times larger again, both live at once and
+/// once per concurrent request. Borrowing straight from the cache costs
+/// nothing but a brief per-shard read lock.
+///
+/// Key order follows `DashMap`'s iteration rather than the sorted order the
+/// `json!` happened to produce; JSON object order is not significant and no
+/// client depends on it.
+struct MapEntries<'a, V>(&'a DashMap<String, V>);
+
+impl<V: Serialize> Serialize for MapEntries<'_, V> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for entry in self.0.iter() {
+            map.serialize_entry(entry.key(), entry.value())?;
+        }
+        map.end()
+    }
+}
+
+/// The same, as a JSON array of just the values.
+struct MapValues<'a, V>(&'a DashMap<String, V>);
+
+impl<V: Serialize> Serialize for MapValues<'_, V> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for entry in self.0.iter() {
+            seq.serialize_element(entry.value())?;
+        }
+        seq.end()
+    }
+}
+
+#[derive(Serialize)]
+struct InstancesStats {
+    count: usize,
+    down: usize,
+}
+
+#[derive(Serialize)]
+struct InstancesBody<'a> {
+    instances: MapEntries<'a, Vec<crate::logs::Channel>>,
+    #[serde(rename = "instancesStats")]
+    instances_stats: InstancesStats,
+}
+
+#[derive(Serialize)]
+struct ChannelsBody<'a> {
+    channels: MapValues<'a, crate::logs::Channel>,
+    #[serde(rename = "instancesStats")]
+    instances_stats: InstancesStats,
 }
 
 fn with_source(mut response: Response, source: &impl serde::Serialize) -> Response {
@@ -93,16 +153,13 @@ pub async fn instances(
     );
 
     let (count, down) = state.caches.stats();
-    let instances: HashMap<String, Vec<crate::logs::Channel>> = state
-        .caches
-        .instance_channels
-        .iter()
-        .map(|entry| (entry.key().clone(), entry.value().clone()))
-        .collect();
 
     json_status(
         200,
-        json!({ "instancesStats": { "count": count, "down": down }, "instances": instances }),
+        InstancesBody {
+            instances: MapEntries(&state.caches.instance_channels),
+            instances_stats: InstancesStats { count, down },
+        },
     )
 }
 
@@ -120,16 +177,13 @@ pub async fn channels(
     );
 
     let (count, down) = state.caches.stats();
-    let channels: Vec<crate::logs::Channel> = state
-        .caches
-        .unique_channels
-        .iter()
-        .map(|e| e.value().clone())
-        .collect();
 
     json_status(
         200,
-        json!({ "instancesStats": { "count": count, "down": down }, "channels": channels }),
+        ChannelsBody {
+            channels: MapValues(&state.caches.unique_channels),
+            instances_stats: InstancesStats { count, down },
+        },
     )
 }
 
@@ -356,14 +410,10 @@ pub async fn recent_messages(
     );
 
     let result = get_recent_messages(&state, &channel, &query).await;
-    let status = result.get("status").and_then(|v| v.as_u64()).unwrap_or(400) as u16;
-    let source = result.get("instance").cloned().unwrap_or_else(|| json!([]));
+    let status = StatusCode::from_u16(result.status).unwrap_or(StatusCode::BAD_REQUEST);
+    let source = result.instance.clone();
 
-    let response = (
-        StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST),
-        Json(result),
-    )
-        .into_response();
+    let response = (status, Json(result)).into_response();
     with_source(response, &source)
 }
 
@@ -398,15 +448,23 @@ pub async fn mirror(State(state): State<Arc<AppState>>, headers: HeaderMap, uri:
         MirrorOutcome::Proxied {
             status,
             content_type,
+            content_length,
             body,
             source,
         } => {
-            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
             let content_type =
                 content_type.unwrap_or_else(|| "application/octet-stream".to_string());
-            let mut response = (code, body).into_response();
+            let mut response = Response::new(body);
+            *response.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
             if let Ok(value) = content_type.parse() {
                 response.headers_mut().insert(header::CONTENT_TYPE, value);
+            }
+            // Forwarded when upstream declared one; the compression layer
+            // strips it again if it ends up compressing the stream.
+            if let Some(length) = content_length
+                && let Ok(value) = length.to_string().parse()
+            {
+                response.headers_mut().insert(header::CONTENT_LENGTH, value);
             }
             with_source(response, &source)
         }

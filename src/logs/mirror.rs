@@ -1,5 +1,6 @@
 use std::sync::{Arc, LazyLock};
 
+use axum::body::Body;
 use regex::Regex;
 
 use crate::http_client;
@@ -32,11 +33,17 @@ pub enum MirrorOutcome {
     },
     /// The upstream endpoint responded with an HTML page instead of API data.
     InvalidEndpoint,
-    /// Successful passthrough.
+    /// Successful passthrough. The body is the upstream response streamed
+    /// through unbuffered — a single `/channel/{name}/{year}/{month}` day of
+    /// raw logs can be hundreds of megabytes, and buffering it (plus the
+    /// compression layer's copy of it) meant peak memory scaled with the
+    /// number of concurrent mirror requests times the largest log a client
+    /// could ask for. Nothing here needs the whole body in memory.
     Proxied {
         status: u16,
         content_type: Option<String>,
-        body: bytes::Bytes,
+        content_length: Option<u64>,
+        body: Body,
         source: Vec<String>,
     },
     UpstreamError(String),
@@ -123,6 +130,7 @@ pub async fn mirror_request(state: &Arc<AppState>, raw_url: &str) -> MirrorOutco
     };
 
     let status = response.status().as_u16();
+    let content_length = response.content_length();
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -136,13 +144,14 @@ pub async fn mirror_request(state: &Arc<AppState>, raw_url: &str) -> MirrorOutco
         return MirrorOutcome::InvalidEndpoint;
     }
 
-    match response.bytes().await {
-        Ok(body) => MirrorOutcome::Proxied {
-            status,
-            content_type,
-            body,
-            source,
-        },
-        Err(err) => MirrorOutcome::UpstreamError(err.to_string()),
+    MirrorOutcome::Proxied {
+        status,
+        content_type,
+        content_length,
+        // `reqwest::Body` is itself an `http_body::Body`, so the upstream
+        // response pipes straight into the outgoing one without reqwest's
+        // `stream` feature (and its wasm dependency tree) in the mix.
+        body: Body::new(reqwest::Body::from(response)),
+        source,
     }
 }

@@ -3,7 +3,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info};
 
@@ -17,6 +17,39 @@ const RECENT_MESSAGES_TIMEOUT: Duration = Duration::from_secs(5);
 const RUSTLOG_DAY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_BACKFILL_DAYS: usize = 7;
 const MAX_RETRIES: usize = 3;
+
+/// Hard ceiling on the client-supplied `limit`. It is the only knob a caller
+/// has over how much this endpoint allocates: it bounds both how many lines
+/// the rustlog backfill asks each day for and how large the assembled
+/// response grows, so an unclamped `?limit=999999999` was a single-request
+/// out-of-memory. Real clients ask for far less than this — Chatterino
+/// requests 800, and recent-messages2 itself caps at 1000 — so the ceiling
+/// is generous enough to be invisible in practice.
+const MAX_LIMIT: usize = 100_000;
+
+/// Response body for the recent-messages endpoints.
+///
+/// Serialized straight from this struct rather than built as a
+/// `serde_json::Value`: routing every message through a `Value` tree meant a
+/// second full copy of the entire message list (each `String` re-boxed into a
+/// `Value`, which is several times the size of the line itself) alive at the
+/// same time as the first, purely to hand it to the serializer.
+///
+/// Fields are ordered alphabetically to reproduce the old `json!` output
+/// byte for byte — `serde_json` is built without `preserve_order` here, so
+/// its maps serialize in `BTreeMap` (sorted-key) order.
+#[derive(Debug, Serialize)]
+pub struct RecentMessagesResponse {
+    pub count: usize,
+    pub elapsed: Elapsed,
+    pub error: Option<String>,
+    pub error_code: Option<String>,
+    pub instance: Vec<String>,
+    pub messages: Vec<String>,
+    pub request: Value,
+    pub status: u16,
+    pub status_message: Option<String>,
+}
 
 #[derive(Debug, Default, Deserialize)]
 struct RmResponse {
@@ -123,14 +156,15 @@ pub async fn get_recent_messages(
     state: &Arc<AppState>,
     channel: &str,
     query: &HashMap<String, String>,
-) -> Value {
+) -> RecentMessagesResponse {
     let start = Instant::now();
 
     let limit: usize = query
         .get("limit")
         .and_then(|v| v.parse().ok())
         .filter(|&n: &usize| n > 0)
-        .unwrap_or(1000);
+        .unwrap_or(1000)
+        .min(MAX_LIMIT);
     let rm_only = query.get("rm_only").map(String::as_str) == Some("true");
 
     let raw_query = serde_urlencoded::to_string(query).unwrap_or_default();
@@ -213,8 +247,8 @@ pub async fn get_recent_messages(
                 }
 
                 let list = &logs.logged_data.list;
+                let mut days: Vec<Vec<String>> = Vec::new();
                 let mut total = messages.len();
-                let mut logs_messages = messages.clone();
                 let mut days_fetched = 0usize;
 
                 while total < limit && days_fetched < MAX_BACKFILL_DAYS && days_fetched < list.len()
@@ -231,7 +265,7 @@ pub async fn get_recent_messages(
                     {
                         Ok(day_logs) => {
                             total += day_logs.len();
-                            logs_messages = day_logs.into_iter().chain(logs_messages).collect();
+                            days.push(day_logs);
                         }
                         Err(err) => {
                             if days_fetched == 0 {
@@ -243,19 +277,31 @@ pub async fn get_recent_messages(
                 }
 
                 info!(
-                    "[{}] Channel: {channel} | 200 - {} messages",
-                    instance_link.replace("https://", ""),
-                    logs_messages.len()
+                    "[{}] Channel: {channel} | 200 - {total} messages",
+                    instance_link.replace("https://", "")
                 );
 
-                if logs_messages.len() >= messages.len() {
-                    instance.push(instance_link.clone());
-                    messages = logs_messages;
-                    error_code = None;
-                    error = None;
-                    status = 200;
-                    success = true;
+                // Days are fetched newest first and the response wants oldest
+                // first, with the live recent-messages tail last. Assembled
+                // once into a right-sized buffer: prepending each day with
+                // `chain(..).collect()` reallocated and re-copied the whole
+                // accumulated list on every one of the (up to 7) iterations.
+                let mut merged = Vec::with_capacity(total);
+                for day in days.into_iter().rev() {
+                    merged.extend(day);
                 }
+                // Takes ownership of the recent-messages tail instead of
+                // cloning it. The old guard here compared the merged length
+                // against `messages.len()`, which it is by construction never
+                // smaller than.
+                merged.append(&mut messages);
+
+                instance.push(instance_link.clone());
+                messages = merged;
+                error_code = None;
+                error = None;
+                status = 200;
+                success = true;
 
                 Ok(())
             }
@@ -300,15 +346,15 @@ pub async fn get_recent_messages(
         start.elapsed().as_secs_f64() * 1000.0
     );
 
-    json!({
-        "status": status,
-        "status_message": status_message,
-        "error": error,
-        "error_code": error_code,
-        "instance": instance,
-        "elapsed": Elapsed::since(start),
-        "count": messages.len(),
-        "request": request,
-        "messages": messages,
-    })
+    RecentMessagesResponse {
+        count: messages.len(),
+        elapsed: Elapsed::since(start),
+        error,
+        error_code,
+        instance,
+        messages,
+        request,
+        status,
+        status_message,
+    }
 }

@@ -50,7 +50,7 @@ pub struct Available {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoggedData {
-    pub list: Vec<AvailableLogDate>,
+    pub list: Arc<Vec<AvailableLogDate>>,
     pub days: usize,
     pub since: Option<AvailableLogDate>,
 }
@@ -98,6 +98,10 @@ pub struct InstanceResult {
     pub elapsed: Elapsed,
 }
 
+/// One instance's ranking entry: its display link, the user-facing full
+/// link, and the shared date list its rank is derived from.
+type RankedInstance = (String, String, Arc<Vec<AvailableLogDate>>);
+
 /// Outcome of probing a single instance for a channel (and optionally a
 /// user)'s logs. An enum instead of a status code + loosely-related
 /// `Option` fields, so a caller can never observe an invariant violation
@@ -116,14 +120,14 @@ enum GetLogsOutcome {
     ChannelOnly {
         link: String,
         channel_full: String,
-        list: Vec<AvailableLogDate>,
+        list: Arc<Vec<AvailableLogDate>>,
     },
     /// The channel (and, if requested, the user) are logged here.
     Available {
         link: String,
         channel_full: String,
         full: String,
-        list: Vec<AvailableLogDate>,
+        list: Arc<Vec<AvailableLogDate>>,
     },
 }
 
@@ -132,7 +136,7 @@ async fn fetch_list(
     host: &str,
     channel_path: &str,
     channel_clean: &str,
-) -> anyhow::Result<Vec<AvailableLogDate>> {
+) -> anyhow::Result<Arc<Vec<AvailableLogDate>>> {
     let response = state
         .http
         .get(format!("https://{host}/list"))
@@ -142,7 +146,7 @@ async fn fetch_list(
         .await?
         .error_for_status()?;
     let body: ListResponse = response.json().await?;
-    Ok(body.available_logs)
+    Ok(Arc::new(body.available_logs))
 }
 
 async fn fetch_user_status(
@@ -181,18 +185,6 @@ async fn get_logs(
     pretty: bool,
     banned: bool,
 ) -> GetLogsOutcome {
-    let channels = state
-        .caches
-        .instance_channels
-        .get(key)
-        .map(|entry| {
-            entry
-                .iter()
-                .flat_map(|c| [c.name.clone(), c.user_id.clone()])
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
     let channel_path = if util::USER_ID_REGEX.is_match(channel) {
         "channelid"
     } else {
@@ -201,10 +193,29 @@ async fn get_logs(
     let host = state.instance_host(key);
     let channel_clean = util::strip_id_prefix(channel);
 
-    if !banned && !channels.iter().any(|c| c == channel_clean) {
+    // Scanned against the live map entry rather than a cloned-out `Vec`.
+    // Materialising the list here cost ~2*N `String` allocations per instance
+    // per request, with every alive instance's copy live at once (they're
+    // probed concurrently) — tens of megabytes of churn to answer a single
+    // bool, and the dominant source of the resident-memory blowup under load.
+    // The guard is dropped before the first `.await` below, so it can't hold
+    // a shard lock against `reload`'s writes.
+    let (channel_known, instance_down) = match state.caches.instance_channels.get(key) {
+        Some(entry) => (
+            entry
+                .iter()
+                .any(|c| c.name == channel_clean || c.user_id == channel_clean),
+            entry.is_empty(),
+        ),
+        // Not loaded yet: matches the previous `unwrap_or_default()` empty
+        // list — nothing known, and reported down for a banned-channel lookup.
+        None => (false, true),
+    };
+
+    if !banned && !channel_known {
         return GetLogsOutcome::ChannelNotFound;
     }
-    if channels.is_empty() {
+    if instance_down {
         return GetLogsOutcome::Down;
     }
 
@@ -215,7 +226,7 @@ async fn get_logs(
             .await
             .unwrap_or_else(|err| {
                 error!("[{host}] Failed loading {channel} length: {err}");
-                Vec::new()
+                Arc::new(Vec::new())
             });
         state
             .caches
@@ -236,7 +247,7 @@ async fn get_logs(
             Ok(list) => list,
             Err(err) => {
                 error!("[{host}] Failed loading {channel} length: {err}");
-                Vec::new()
+                Arc::new(Vec::new())
             }
         }
     };
@@ -405,8 +416,8 @@ pub async fn get_instance(
     let mut channel_links: Vec<String> = Vec::new();
     let mut user_instances: Vec<String> = Vec::new();
     let mut channel_instances: Vec<String> = Vec::new();
-    let mut user_with_len: Vec<(String, String, Vec<AvailableLogDate>)> = Vec::new();
-    let mut channel_with_len: Vec<(String, String, Vec<AvailableLogDate>)> = Vec::new();
+    let mut user_with_len: Vec<RankedInstance> = Vec::new();
+    let mut channel_with_len: Vec<RankedInstance> = Vec::new();
 
     if error.is_none() {
         let alive = state.alive_instances();

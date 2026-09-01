@@ -151,6 +151,21 @@
               '';
             };
 
+            environmentFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.path;
+              default = null;
+              example = "/run/secrets/bestlogs-rs.env";
+              description = ''
+                Path to a systemd `EnvironmentFile` (`KEY=value` lines) holding
+                secrets that must not end up in `settings`, since that is
+                serialised into the world-readable Nix store. Currently only
+                `BESTLOGS_UMAMI_TOKEN`, which overrides `umamiStats.token`.
+
+                Read by systemd itself before privileges are dropped, so the
+                file can stay root-owned despite `DynamicUser`.
+              '';
+            };
+
             openFirewall = lib.mkOption {
               type = lib.types.bool;
               default = false;
@@ -174,6 +189,7 @@
               serviceConfig = {
                 ExecStart = lib.getExe cfg.package;
                 WorkingDirectory = configDir;
+                EnvironmentFile = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
                 DynamicUser = true;
                 Restart = "on-failure";
                 RestartSec = 5;

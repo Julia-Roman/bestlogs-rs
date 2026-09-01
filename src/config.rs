@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 /// `config.json` is missing next to the executable at runtime.
 const DEFAULT_CONFIG_JSON: &str = include_str!("../example_config.json");
 
+/// Overrides `umamiStats.token` when set. The token is a credential, so a
+/// deployment can keep it out of `config.json` (and out of the world-readable
+/// Nix store) and hand it over via a systemd `EnvironmentFile` instead.
+const UMAMI_TOKEN_ENV: &str = "BESTLOGS_UMAMI_TOKEN";
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct InstanceMeta {
     pub maintainer: Option<String>,
@@ -108,6 +113,9 @@ impl Config {
     /// is logged as a warning and ignored in favor of the built-in defaults
     /// — a config typo should degrade the deployment, not take the whole
     /// service down.
+    ///
+    /// `BESTLOGS_UMAMI_TOKEN`, if set, wins over whatever `umamiStats.token`
+    /// the merged config ended up with.
     pub fn load() -> Config {
         let defaults: serde_json::Value = serde_json::from_str(DEFAULT_CONFIG_JSON)
             .expect("built-in example_config.json must be valid JSON");
@@ -141,7 +149,7 @@ impl Config {
             }
         };
 
-        match serde_json::from_value(merged) {
+        let mut config: Config = match serde_json::from_value(merged) {
             Ok(config) => config,
             Err(err) => {
                 tracing::warn!(
@@ -150,6 +158,16 @@ impl Config {
                 serde_json::from_value(defaults)
                     .expect("built-in example_config.json must match Config's schema")
             }
+        };
+
+        match (std::env::var(UMAMI_TOKEN_ENV), config.umami_stats.as_mut()) {
+            (Ok(token), Some(umami)) => umami.token = token.trim().to_owned(),
+            (Ok(_), None) => tracing::warn!(
+                "{UMAMI_TOKEN_ENV} is set but there is no umamiStats block to apply it to"
+            ),
+            (Err(_), _) => {}
         }
+
+        config
     }
 }

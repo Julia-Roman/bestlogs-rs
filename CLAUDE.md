@@ -78,6 +78,8 @@ commit) before `nix build`/`nix flake check` will pick them up.
   `axum::serve`. The server starts accepting connections before the first channel-list load completes.
 - `config.rs` — `Config::load()` is infallible: `example_config.json` is compiled in via `include_str!` as the
   always-available default; `config.json` in the cwd, if valid, is merged over it key-by-key at the top level.
+  The one env override is `BESTLOGS_UMAMI_TOKEN`, which wins over `umamiStats.token` so the credential can be
+  supplied out-of-band (systemd `EnvironmentFile`) instead of living in a checked-in/Nix-store `config.json`.
 - `state.rs` — `AppState` (one `Arc<AppState>` for the process) holds the shared `reqwest::Client`, config, and
   `Caches`. Two different caching mechanisms coexist:
   - `instance_channels`/`unique_channels` (`DashMap`): each justlog/rustlog instance's channel list, refreshed by
@@ -146,5 +148,7 @@ never needs a live backend and the output can be embedded byte-for-byte into the
 `packages.default` builds the frontend via `buildNpmPackage` and copies its output into
 `rustPlatform.buildRustPackage`'s `preBuild` before compiling (so `rust-embed` has something to embed).
 `nixosModules.default` exposes `services.bestlogs-rs` (`enable`, `settings` → written to a `config.json` in the
-service's `WorkingDirectory` via `pkgs.writeTextDir`, `openFirewall`) for NixOS deployments. `aws-lc-rs`
+service's `WorkingDirectory` via `pkgs.writeTextDir`, `environmentFile`, `openFirewall`) for NixOS deployments.
+Anything in `settings` is world-readable via the Nix store, so secrets go through `environmentFile` instead —
+systemd reads it as root, which is what makes it work alongside `DynamicUser`. `aws-lc-rs`
 (reqwest's rustls crypto backend) needs `cmake` + a C compiler to build, already wired into `nativeBuildInputs`.

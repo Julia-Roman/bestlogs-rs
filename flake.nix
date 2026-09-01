@@ -72,9 +72,14 @@
             # automatically; only libiconv needs adding explicitly.
             buildInputs = lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
 
-            # rust-embed reads this directory at compile time; build.rs
-            # already falls back to "unknown" when `git` isn't available, so
-            # the Nix build (no .git in backendSrc) still succeeds.
+            # backendSrc deliberately has no .git in it, so build.rs can't ask
+            # git for the revision and would otherwise stamp the binary
+            # "unknown" — /meta and the site footer show this. shortRev is set
+            # only for a clean tree; a dirty checkout gets dirtyShortRev (with
+            # a "-dirty" suffix), and a non-git source neither.
+            GIT_COMMIT_HASH = self.shortRev or self.dirtyShortRev or "unknown";
+
+            # rust-embed reads this directory at compile time.
             preBuild = ''
               mkdir -p frontend
               cp -r ${frontend} frontend/build

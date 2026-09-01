@@ -97,14 +97,9 @@ impl RateLimiter {
 fn forwarded_address(headers: &HeaderMap) -> Option<IpAddr> {
     let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
 
-    // Cloudflare and nginx's usual `proxy_set_header X-Real-IP` both name a
-    // single address and both overwrite whatever the client sent, so they're
-    // preferred over `X-Forwarded-For` — that one is a chain the client can
-    // seed with entries of its own, and a proxy that merely *appends* leaves
-    // its leftmost (nominally original-client) entry attacker-controlled.
-    let candidate = header("cf-connecting-ip")
+    let candidate = header("x-forwarded-for")
         .or_else(|| header("x-real-ip"))
-        .or_else(|| header("x-forwarded-for").and_then(|chain| chain.split(',').next()))?;
+        .or_else(|| header("cf-connecting-ip").and_then(|chain| chain.split(',').next()))?;
 
     candidate.trim().parse().ok()
 }

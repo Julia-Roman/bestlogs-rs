@@ -1,0 +1,12 @@
+.vscode/
+.claude/
+
+/target
+config.json
+/result
+/result-*
+
+# frontend
+frontend/node_modules
+frontend/.svelte-kit
+frontend/build

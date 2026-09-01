@@ -1,0 +1,74 @@
+{
+  "port": 2028,
+  "instance": {
+    "maintainer": "Anonymous",
+    "message": "Contact me for updates!",
+    "country": "Unknown",
+    "city": "Unknown",
+    "flag": "US",
+    "url": "logs.zonian.dev"
+  },
+  "justlogsInstances": {
+    "logs.spanix.team": {
+      "maintainer": "ZonianMidian"
+    },
+    "logs.nadeko.net": {
+      "maintainer": "Fijxu"
+    },
+    "logs.ivr.fi": {
+      "maintainer": "Leppunen"
+    },
+    "harambelogs.pl": {
+      "maintainer": "zneix"
+    },
+    "vtlogs.moe": {
+      "maintainer": ""
+    },
+    "logs.magichack.xyz": {
+      "maintainer": "HackMagic"
+    },
+    "logs.susgee.dev": {
+      "maintainer": "LUCAS19961"
+    },
+    "logs.potat.app": {
+      "maintainer": "RyanPotat"
+    },
+    "logs.supa.codes": {
+      "maintainer": "Supelle"
+    },
+    "logs.mejkiz.com": {
+      "maintainer": "Mejkiz"
+    },
+    "logs.fais.al": {
+      "maintainer": "Faisal"
+    },
+    "logs.folhinhabot.com": {
+      "maintainer": "Leafyzito"
+    },
+    "logxx.dev": {
+      "maintainer": "seryxx"
+    },
+    "logs.mrchuw.com.br": {
+      "maintainer": "Mr_Chuw"
+    },
+    "logs.twitchmetrics.xyz": {
+      "maintainer": "mechoriet"
+    },
+    "logs.jimmyboy.dev": {
+      "maintainer": "devJimmyboy"
+    }
+  },
+  "recentmessagesInstances": {
+    "recent-messages.zneix.eu": {
+      "maintainer": "zneix"
+    },
+    "recent-messages.robotty.de": {
+      "maintainer": "randers"
+    }
+  },
+  "umamiStats": {
+    "token": "",
+    "id": "",
+    "url": "https://cloud.umami.is"
+  }
+}

@@ -1,0 +1,29 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: nix build (frontend + backend, embedded)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: nix flake check
+        run: nix flake check --no-build
+
+      - name: nix build
+        run: nix build .#default -L
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: bestlogs-rs-x86_64-linux
+          path: result/bin/bestlogs-rs
+          if-no-files-found: error

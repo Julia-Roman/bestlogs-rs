@@ -1,0 +1,26 @@
+[package]
+name = "bestlogs-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8.9", features = ["json"] }
+bytes = "1.12.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
+dashmap = "6.2.1"
+futures = "0.3.34"
+indexmap = { version = "2.14.1", features = ["serde"] }
+moka = { version = "0.12.16", features = ["future"] }
+regex = "1.13.1"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "query"] }
+rust-embed = { version = "8.12.0", features = ["mime-guess"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_urlencoded = "0.7.1"
+tokio = { version = "1.53.1", features = ["full"] }
+tower = "0.5.3"
+tower-http = { version = "0.7.1", features = ["compression-full", "cors", "trace", "fs"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+urlencoding = "2.1.3"

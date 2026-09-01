@@ -156,6 +156,12 @@
               default = false;
               description = "Open the configured port in the firewall.";
             };
+
+            restartIfChanged = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+              description = "Automatically restart the service if changed.";
+            };
           };
 
           config = lib.mkIf cfg.enable {
@@ -164,6 +170,7 @@
               wantedBy = [ "multi-user.target" ];
               after = [ "network-online.target" ];
               wants = [ "network-online.target" ];
+              restartIfChanged = cfg.restartIfChanged;
               serviceConfig = {
                 ExecStart = lib.getExe cfg.package;
                 WorkingDirectory = configDir;

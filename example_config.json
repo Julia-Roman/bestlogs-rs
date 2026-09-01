@@ -66,6 +66,12 @@
       "maintainer": "randers"
     }
   },
+  "rateLimit": {
+    "enabled": true,
+    "events": 30,
+    "intervalSeconds": 10,
+    "trustProxy": false
+  },
   "umamiStats": {
     "token": "",
     "id": "",

@@ -36,7 +36,13 @@ async fn main() -> anyhow::Result<()> {
     // accepting connections, same ordering as the original.
     reload::spawn_loops(state);
 
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        // The rate limiter needs the peer address, which is only available
+        // to handlers when the service is made with connect info.
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

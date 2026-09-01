@@ -29,6 +29,50 @@ pub struct RecentMessagesInstanceMeta {
     pub maintainer: Option<String>,
 }
 
+/// Token-bucket limits for the log-lookup endpoints. Every field carries a
+/// `default` so a `config.json` that predates rate limiting — or that sets
+/// only `enabled` — still deserializes instead of dropping the whole file
+/// back to the built-in defaults.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitConfig {
+    #[serde(default = "default_rate_limit_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_rate_limit_events")]
+    pub events: u32,
+    #[serde(default = "default_rate_limit_interval_seconds")]
+    pub interval_seconds: u64,
+    /// Only turn this on behind a proxy that overwrites the forwarding
+    /// headers (Cloudflare, or an nginx with `proxy_set_header`). On a
+    /// directly-exposed deployment a client can forge them and mint itself
+    /// an unlimited number of buckets.
+    #[serde(default)]
+    pub trust_proxy: bool,
+}
+
+fn default_rate_limit_enabled() -> bool {
+    true
+}
+
+fn default_rate_limit_events() -> u32 {
+    30
+}
+
+fn default_rate_limit_interval_seconds() -> u64 {
+    10
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> RateLimitConfig {
+        RateLimitConfig {
+            enabled: default_rate_limit_enabled(),
+            events: default_rate_limit_events(),
+            interval_seconds: default_rate_limit_interval_seconds(),
+            trust_proxy: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UmamiConfig {
     #[serde(default)]
@@ -49,6 +93,8 @@ pub struct Config {
     pub justlogs_instances: IndexMap<String, JustlogInstanceMeta>,
     #[serde(default)]
     pub recentmessages_instances: IndexMap<String, RecentMessagesInstanceMeta>,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
     pub umami_stats: Option<UmamiConfig>,
 }
 

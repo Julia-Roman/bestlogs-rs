@@ -1,3 +1,13 @@
-# allow crawling everything by default
 User-agent: *
-Disallow:
+Disallow: /api/
+Disallow: /channel/
+Disallow: /channelid/
+Disallow: /channels
+Disallow: /health
+Disallow: /instances
+Disallow: /list
+Disallow: /meta
+Disallow: /namehistory/
+Disallow: /rdr/
+Disallow: /recent-messages/
+Disallow: /rm/

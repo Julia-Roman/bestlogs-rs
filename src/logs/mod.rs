@@ -3,6 +3,7 @@ pub mod instance;
 pub mod mirror;
 pub mod namehistory;
 pub mod recent_messages;
+pub mod search;
 
 use serde::{Deserialize, Serialize};
 

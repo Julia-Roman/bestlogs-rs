@@ -102,6 +102,27 @@ pub async fn load_instance_channels(state: &Arc<AppState>, only_error: bool) {
         }
     }
 
+    // A recheck that brought an instance back adds channels too, so the
+    // index is rebuilt for those as well rather than staying an hour stale.
+    // Sorting ~1M channels is a few hundred milliseconds of straight CPU, so
+    // it goes on a blocking thread rather than stalling a request worker.
+    if !only_error || working > 0 {
+        let index = {
+            let state = state.clone();
+            tokio::task::spawn_blocking(move || state.caches.rebuild_search_index()).await
+        };
+
+        match index {
+            Ok(index) if !only_error => info!(
+                "[Logs] Search index: {} channels, {:.1} MB",
+                index.len(),
+                index.footprint_bytes() as f64 / (1024.0 * 1024.0)
+            ),
+            Ok(_) => {}
+            Err(err) => error!("[Logs] Failed rebuilding the search index: {err}"),
+        }
+    }
+
     if !only_error {
         state.mark_updated();
         state.caches.clear_derived();

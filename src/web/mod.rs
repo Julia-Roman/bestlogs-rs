@@ -55,6 +55,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/meta", get(meta::meta))
         .route("/meta/contact", get(meta::contact))
         .route("/meta/status", get(meta::status))
+        .route("/meta/search", get(meta::search))
         .fallback(static_files::fallback)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())

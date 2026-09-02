@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -8,6 +8,7 @@ use moka::future::Cache;
 use crate::config::Config;
 use crate::http_client;
 use crate::logs::channels::InstanceChannels;
+use crate::logs::search::{SearchIndex, SearchIndexBuilder};
 use crate::logs::{AvailableLogDate, Channel};
 use crate::twitch::TwitchUser;
 use crate::util;
@@ -86,6 +87,12 @@ pub struct Caches {
     pub instance_channels: DashMap<String, InstanceChannels>,
     /// All channels seen across every instance, keyed by Twitch user id.
     pub unique_channels: DashMap<String, Channel>,
+    /// `unique_channels` arranged for login search, rebuilt by `reload.rs`
+    /// once a refresh has finished. Read as a cheap `Arc` clone, so a
+    /// rebuild never blocks a search beyond the swap itself; a channel
+    /// discovered mid-request (`logs/instance.rs`) is therefore searchable
+    /// from the next reload rather than immediately.
+    pub search_index: RwLock<Arc<SearchIndex>>,
     /// Behind an `Arc` so the ~16 per-request copies of a channel's date
     /// list (one per probed instance, plus the ranked/response copies) are
     /// refcount bumps instead of deep clones of a few thousand `String`s.
@@ -101,6 +108,7 @@ impl Caches {
         Caches {
             instance_channels: DashMap::new(),
             unique_channels: DashMap::new(),
+            search_index: RwLock::new(Arc::new(SearchIndex::empty())),
             list_data: Cache::builder()
                 .max_capacity(LIST_CACHE_BYTES)
                 .weigher(|key: &String, list: &Arc<Vec<AvailableLogDate>>| list_weight(key, list))
@@ -119,6 +127,34 @@ impl Caches {
                 .time_to_live(Duration::from_secs(60 * 60))
                 .build(),
         }
+    }
+
+    pub fn search_index(&self) -> Arc<SearchIndex> {
+        self.search_index
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    /// Rebuilds the login search index from `unique_channels`.
+    ///
+    /// The new index is built before the lock is taken, so searches keep
+    /// serving the previous one for the whole build and only ever wait on
+    /// the pointer swap.
+    pub fn rebuild_search_index(&self) -> Arc<SearchIndex> {
+        let mut builder = SearchIndexBuilder::with_capacity(self.unique_channels.len());
+        for entry in self.unique_channels.iter() {
+            let channel = entry.value();
+            builder.push(&channel.name, &channel.user_id);
+        }
+        let index = builder.finish();
+
+        let index = Arc::new(index);
+        *self
+            .search_index
+            .write()
+            .unwrap_or_else(|err| err.into_inner()) = index.clone();
+        index
     }
 
     /// Matches `loadInstanceChannels`'s full-reload behaviour of clearing

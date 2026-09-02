@@ -85,7 +85,7 @@ struct InstancesStats {
 
 #[derive(Serialize)]
 struct InstancesBody<'a> {
-    instances: MapEntries<'a, Vec<crate::logs::Channel>>,
+    instances: MapEntries<'a, crate::logs::channels::InstanceChannels>,
     #[serde(rename = "instancesStats")]
     instances_stats: InstancesStats,
 }

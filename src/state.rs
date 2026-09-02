@@ -7,6 +7,7 @@ use moka::future::Cache;
 
 use crate::config::Config;
 use crate::http_client;
+use crate::logs::channels::InstanceChannels;
 use crate::logs::{AvailableLogDate, Channel};
 use crate::twitch::TwitchUser;
 use crate::util;
@@ -80,9 +81,9 @@ fn user_weight(key: &str, user: &TwitchUser) -> u32 {
 }
 
 pub struct Caches {
-    /// Per-instance channel list; an empty Vec means the instance is
+    /// Per-instance channel list; an empty one means the instance is
     /// considered down (matches the original's `instanceChannels`).
-    pub instance_channels: DashMap<String, Vec<Channel>>,
+    pub instance_channels: DashMap<String, InstanceChannels>,
     /// All channels seen across every instance, keyed by Twitch user id.
     pub unique_channels: DashMap<String, Channel>,
     /// Behind an `Arc` so the ~16 per-request copies of a channel's date
@@ -184,7 +185,10 @@ impl AppState {
 
     /// Instances not currently flagged as down (i.e. with a non-empty last
     /// loaded channel list, or not loaded yet).
-    pub fn alive_instances(&self) -> Vec<String> {
+    ///
+    /// Borrowed from the config rather than cloned: this runs once per
+    /// lookup and the keys outlive any single request.
+    pub fn alive_instances(&self) -> Vec<&str> {
         self.config
             .justlogs_instances
             .keys()
@@ -195,7 +199,7 @@ impl AppState {
                     .map(|entry| !entry.is_empty())
                     .unwrap_or(true)
             })
-            .cloned()
+            .map(String::as_str)
             .collect()
     }
 }

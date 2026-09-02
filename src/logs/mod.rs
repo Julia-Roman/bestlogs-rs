@@ -1,3 +1,4 @@
+pub mod channels;
 pub mod instance;
 pub mod mirror;
 pub mod namehistory;

@@ -6,6 +6,7 @@ use tracing::{error, info};
 
 use crate::http_client;
 use crate::logs::Channel;
+use crate::logs::channels::InstanceChannels;
 use crate::state::{AppState, ERROR_INTERVAL_MS, RELOAD_INTERVAL_MS};
 
 #[derive(Deserialize)]
@@ -84,13 +85,19 @@ pub async fn load_instance_channels(state: &Arc<AppState>, only_error: bool) {
                     info!("[{key}] Loaded {} channels", channels.len());
                 }
                 working += 1;
-                state.caches.instance_channels.insert(key, channels);
+                state
+                    .caches
+                    .instance_channels
+                    .insert(key, InstanceChannels::new(channels));
             }
             Err(err) => {
                 if !only_error {
                     error!("[{key}] Failed loading channels: {err}");
                 }
-                state.caches.instance_channels.insert(key, Vec::new());
+                state
+                    .caches
+                    .instance_channels
+                    .insert(key, InstanceChannels::empty());
             }
         }
     }

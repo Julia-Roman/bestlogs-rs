@@ -84,14 +84,21 @@ commit) before `nix build`/`nix flake check` will pick them up.
   `Caches`. Two different caching mechanisms coexist:
   - `instance_channels`/`unique_channels` (`DashMap`): each justlog/rustlog instance's channel list, refreshed by
     `reload.rs`'s background loops (full reload hourly, down-instances-only recheck every minute — an instance
-    with an empty channel list is considered down and excluded from `alive_instances()`).
+    with an empty channel list is considered down and excluded from `alive_instances()`). The values are
+    `logs::channels::InstanceChannels`, not bare `Vec<Channel>`: the lists are enormous (~1.6M entries across
+    the configured instances, one instance alone carrying ~1M) and every lookup membership-tests *every* alive
+    instance, so it answers `contains()` by binary search — the vector is kept sorted by login (the common
+    lookup), with a sorted `u32` index alongside it for `id:`-style references. `/instances` therefore
+    serializes channels in login order rather than the instance's own; nothing depends on that ordering.
   - `list_data`/`status_codes`/`info_data` (`moka::future::Cache`, TTL'd): per-channel/user probe results and
     ivr.fi user lookups. These use `try_get_with` so concurrent requests for the same key coalesce into one
     upstream fetch instead of each firing a duplicate; **failed** probes are deliberately never cached (only a
     genuine answer, including a genuinely-empty one, is), so a timeout/5xx self-heals on the next request rather
     than being stuck for the rest of the TTL.
 - `logs/instance.rs` — the core ranking algorithm (`get_instance`/`get_logs`, ported from the original's
-  `getInstance`/`getLogs`): resolves channel/user via `twitch.rs`, fans out to every alive instance concurrently,
+  `getInstance`/`getLogs`): resolves channel/user via `twitch.rs`, fans out to every alive instance concurrently
+  (and, per instance, issues the `/list` day-count probe and the user-availability probe together rather than
+  back to back — they're independent GETs, and serially they doubled the fan-out's cold latency),
   classifies each via the `GetLogsOutcome` enum (Down/ChannelNotFound/OptedOut/ChannelOnly/Available — an enum on
   purpose, so a caller can never observe a "status without a link" situation), and sorts by log-day count.
   **Important invariant**: the `link`/`Link` field an instance contributes is always built from the config's

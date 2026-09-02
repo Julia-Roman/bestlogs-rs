@@ -167,6 +167,87 @@ async fn fetch_user_status(
     Ok(response.status().as_u16())
 }
 
+/// Resolves this instance's day list for the channel, going through the
+/// shared cache unless the caller forced a refresh.
+async fn cached_list(
+    state: &AppState,
+    host: &str,
+    channel: &str,
+    channel_path: &str,
+    channel_clean: &str,
+    cache_key: String,
+    force: bool,
+) -> Arc<Vec<AvailableLogDate>> {
+    let fetch = fetch_list(state, host, channel_path, channel_clean);
+
+    if force {
+        let fetched = match fetch.await {
+            Ok(list) => list,
+            Err(err) => {
+                error!("[{host}] Failed loading {channel} length: {err}");
+                Arc::new(Vec::new())
+            }
+        };
+        state
+            .caches
+            .list_data
+            .insert(cache_key, fetched.clone())
+            .await;
+        fetched
+    } else {
+        match state.caches.list_data.try_get_with(cache_key, fetch).await {
+            Ok(list) => list,
+            Err(err) => {
+                error!("[{host}] Failed loading {channel} length: {err}");
+                Arc::new(Vec::new())
+            }
+        }
+    }
+}
+
+/// The same, for the user-availability probe.
+#[allow(clippy::too_many_arguments)]
+async fn cached_status(
+    state: &AppState,
+    host: &str,
+    channel: &str,
+    channel_path: &str,
+    channel_clean: &str,
+    user: &str,
+    user_path: &str,
+    user_clean: &str,
+    cache_key: String,
+    force: bool,
+) -> u16 {
+    let fetch = fetch_user_status(
+        state,
+        host,
+        channel_path,
+        channel_clean,
+        user_path,
+        user_clean,
+    );
+
+    if force {
+        let resolved = fetch.await.unwrap_or(500);
+        state.caches.status_codes.insert(cache_key, resolved).await;
+        resolved
+    } else {
+        match state
+            .caches
+            .status_codes
+            .try_get_with(cache_key, fetch)
+            .await
+        {
+            Ok(status) => status,
+            Err(err) => {
+                error!("[{host}] Failed checking {channel}/{user} status: {err}");
+                500
+            }
+        }
+    }
+}
+
 /// Port of `Utils.getLogs`: probes a single instance for a channel (and
 /// optionally a user)'s logs and classifies availability.
 ///
@@ -190,23 +271,17 @@ async fn get_logs(
     } else {
         "channel"
     };
-    let host = state.instance_host(key);
     let channel_clean = util::strip_id_prefix(channel);
 
-    // Scanned against the live map entry rather than a cloned-out `Vec`.
-    // Materialising the list here cost ~2*N `String` allocations per instance
-    // per request, with every alive instance's copy live at once (they're
-    // probed concurrently) — tens of megabytes of churn to answer a single
-    // bool, and the dominant source of the resident-memory blowup under load.
-    // The guard is dropped before the first `.await` below, so it can't hold
-    // a shard lock against `reload`'s writes.
+    // A binary search against the live map entry rather than a scan of it
+    // (let alone a cloned-out `Vec`). Every alive instance is probed on
+    // every lookup and the lists total ~1.6M channels, so a linear
+    // membership test made each request do ~1.6M string comparisons before
+    // it could touch the network. The guard is dropped before the first
+    // `.await` below, so it can't hold a shard lock against `reload`'s
+    // writes. See `logs/channels.rs` for how the entry is ordered.
     let (channel_known, instance_down) = match state.caches.instance_channels.get(key) {
-        Some(entry) => (
-            entry
-                .iter()
-                .any(|c| c.name == channel_clean || c.user_id == channel_clean),
-            entry.is_empty(),
-        ),
+        Some(entry) => (entry.contains(channel_clean), entry.is_empty()),
         // Not loaded yet: matches the previous `unwrap_or_default()` empty
         // list — nothing known, and reported down for a banned-channel lookup.
         None => (false, true),
@@ -219,38 +294,10 @@ async fn get_logs(
         return GetLogsOutcome::Down;
     }
 
+    // Only resolved once this instance is actually going to be queried —
+    // it allocates, and the two early returns above are the common case.
+    let host = state.instance_host(key);
     let list_cache_key = format!("logs:list:{key}:{}", channel.replacen("id:", "id-", 1));
-
-    let list = if force {
-        let fetched = fetch_list(state, &host, channel_path, channel_clean)
-            .await
-            .unwrap_or_else(|err| {
-                error!("[{host}] Failed loading {channel} length: {err}");
-                Arc::new(Vec::new())
-            });
-        state
-            .caches
-            .list_data
-            .insert(list_cache_key, fetched.clone())
-            .await;
-        fetched
-    } else {
-        match state
-            .caches
-            .list_data
-            .try_get_with(
-                list_cache_key,
-                fetch_list(state, &host, channel_path, channel_clean),
-            )
-            .await
-        {
-            Ok(list) => list,
-            Err(err) => {
-                error!("[{host}] Failed loading {channel} length: {err}");
-                Arc::new(Vec::new())
-            }
-        }
-    };
 
     let channel_full = if pretty {
         format!("https://tv.supa.sh/logs?c={channel}")
@@ -259,6 +306,16 @@ async fn get_logs(
     };
 
     let Some(user) = user else {
+        let list = cached_list(
+            state,
+            &host,
+            channel,
+            channel_path,
+            channel_clean,
+            list_cache_key,
+            force,
+        )
+        .await;
         return GetLogsOutcome::ChannelOnly {
             link: format!("https://{key}"),
             channel_full,
@@ -278,47 +335,33 @@ async fn get_logs(
     };
     let user_clean = util::strip_id_prefix(user);
 
-    let status_code = if force {
-        let resolved = fetch_user_status(
+    // The day list and the user-availability probe are independent GETs to
+    // the same host, so issue them together. Run sequentially, a cold user
+    // lookup paid two full round-trips at every instance, and the slowest
+    // instance set the latency of the whole fan-out.
+    let (list, status_code) = tokio::join!(
+        cached_list(
             state,
             &host,
+            channel,
             channel_path,
             channel_clean,
+            list_cache_key,
+            force,
+        ),
+        cached_status(
+            state,
+            &host,
+            channel,
+            channel_path,
+            channel_clean,
+            user,
             user_path,
             user_clean,
+            instance_cache_key,
+            force,
         )
-        .await
-        .unwrap_or(500);
-        state
-            .caches
-            .status_codes
-            .insert(instance_cache_key, resolved)
-            .await;
-        resolved
-    } else {
-        match state
-            .caches
-            .status_codes
-            .try_get_with(
-                instance_cache_key,
-                fetch_user_status(
-                    state,
-                    &host,
-                    channel_path,
-                    channel_clean,
-                    user_path,
-                    user_clean,
-                ),
-            )
-            .await
-        {
-            Ok(status) => status,
-            Err(err) => {
-                error!("[{host}] Failed checking {channel}/{user} status: {err}");
-                500
-            }
-        }
-    };
+    );
 
     let full_link = if pretty {
         format!("https://tv.supa.sh/logs?c={channel}&u={user}")

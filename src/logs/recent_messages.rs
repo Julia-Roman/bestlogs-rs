@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{error, info};
 
+use crate::logs::health::Permit;
 use crate::logs::{AvailableLogDate, Elapsed, instance::get_instance};
 use crate::state::AppState;
 use crate::util::TMI_SENT_REGEX;
@@ -60,31 +61,45 @@ struct RmResponse {
     status_message: Option<String>,
 }
 
+/// `None` means the instance is currently tripped (see `logs/health.rs`) and
+/// was skipped without a request. Chatterino opens one of these per joined
+/// channel the moment it connects, so an unresponsive first-choice instance
+/// used to cost every one of those requests a full timeout before the
+/// fallback was even tried.
 async fn fetch_messages(
     state: &AppState,
     instance: &str,
     channel: &str,
     query: &str,
-) -> (u16, RmResponse) {
+) -> Option<(u16, RmResponse)> {
+    let timeout = match state.health.permit(instance) {
+        Permit::Fetch(timeout) => timeout.min(RECENT_MESSAGES_TIMEOUT),
+        Permit::CachedOnly => return None,
+    };
+
     let mut url = format!("https://{instance}/api/v2/recent-messages/{channel}");
     if !query.is_empty() {
         url.push('?');
         url.push_str(query);
     }
 
-    let response = state
-        .http
-        .get(&url)
-        .timeout(RECENT_MESSAGES_TIMEOUT)
-        .send()
-        .await;
+    let started = Instant::now();
+    let response = state.http.get(&url).timeout(timeout).send().await;
     match response {
         Ok(res) => {
-            let status = res.status().as_u16();
+            let status = res.status();
+            if status.is_server_error() {
+                state.health.record_failure(instance, status.as_str());
+            } else {
+                state.health.record_success(instance, started.elapsed());
+            }
             let body = res.json::<RmResponse>().await.unwrap_or_default();
-            (status, body)
+            Some((status.as_u16(), body))
         }
-        Err(_) => (500, RmResponse::default()),
+        Err(err) => {
+            state.health.record_failure(instance, &err.to_string());
+            Some((500, RmResponse::default()))
+        }
     }
 }
 
@@ -177,7 +192,11 @@ pub async fn get_recent_messages(
     let mut rm_instance = String::new();
 
     for entry in state.config.recentmessages_instances.keys() {
-        let (status_code, body) = fetch_messages(state, entry, channel, &raw_query).await;
+        let Some((status_code, body)) = fetch_messages(state, entry, channel, &raw_query).await
+        else {
+            error!("[{entry}] Channel: {channel} | Skipped, instance is unresponsive");
+            continue;
+        };
         status_message = body.status_message.clone();
         rm_instance = format!("https://{entry}");
         status = status_code;
@@ -196,20 +215,20 @@ pub async fn get_recent_messages(
             );
             messages = filtered;
             break;
-        } else {
-            error_code = Some(
-                body.error_code
-                    .unwrap_or_else(|| "internal_server_error".to_string()),
-            );
-            error = Some(
-                body.error
-                    .unwrap_or_else(|| "Internal Server Error".to_string()),
-            );
-            error!(
-                "[{entry}] Channel: {channel} | {status_code} - {}",
-                error.as_deref().unwrap_or("")
-            );
         }
+
+        error_code = Some(
+            body.error_code
+                .unwrap_or_else(|| "internal_server_error".to_string()),
+        );
+        error = Some(
+            body.error
+                .unwrap_or_else(|| "Internal Server Error".to_string()),
+        );
+        error!(
+            "[{entry}] Channel: {channel} | {status_code} - {}",
+            error.as_deref().unwrap_or("")
+        );
     }
 
     let mut instance = vec![rm_instance];

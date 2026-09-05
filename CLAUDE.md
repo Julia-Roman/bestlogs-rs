@@ -37,6 +37,13 @@ Without Nix, install Rust and Node yourself and run the same two build steps.
   `localhost:2028` (see `frontend/vite.config.ts` for the exact proxied paths).
 - No `#[test]`s exist yet; `cargo test` runs 0 tests. Verification is done by running the server and curling/
   screenshotting it (see below), not a unit test suite.
+- `cargo run --release --features bench --bin fanout-bench -- <cert.der> <key.der>` is a load-generator for the
+  log fan-out: it stands up local TLS mock instances with latency profiles modelled on the real deployments
+  (`BENCH_SCENARIO=healthy|degraded|outage|recovery`, the last one taking an instance down mid-run
+  and bringing it back to exercise the breaker's trip *and* close paths), points a real `AppState` at them with the Twitch/channel caches
+  pre-seeded, and reports latency percentiles plus how often the best instance was still ranked first. It is
+  behind the `bench` feature so neither `cargo build` nor the Nix build compiles it; the cert/key are any
+  self-signed pair in DER form (the mocks' certs are never verified — see `http_client.rs`).
 
 Linting (both enforced in `.github/workflows/lint.yml`):
 
@@ -101,10 +108,22 @@ commit) before `nix build`/`nix flake check` will pick them up.
   back to back — they're independent GETs, and serially they doubled the fan-out's cold latency),
   classifies each via the `GetLogsOutcome` enum (Down/ChannelNotFound/OptedOut/ChannelOnly/Available — an enum on
   purpose, so a caller can never observe a "status without a link" situation), and sorts by log-day count.
+  The fan-out is **not** a plain `join_all`: each probe is its own task, and once the request has an answer to
+  the question it was actually asked (channel logs, plus user logs if a user was named) it collects for
+  `FANOUT_RESULT_GRACE` more and then answers, leaving slower probes running to finish into the cache — so a
+  straggler costs one request a possibly shorter ranking instead of costing every request its full latency,
+  and the next lookup of that channel ranks it anyway. A forced refresh (`?force`) opts out and waits for
+  everything.
   **Important invariant**: the `link`/`Link` field an instance contributes is always built from the config's
   display key (`https://{key}`), never from its `alternate` host — `alternate` exists only so background
   reload/probing can hit a different backend address than the one shown to users. The mirror proxy
   (`logs/mirror.rs`) reuses this same `Link` to decide where to actually forward the proxied request.
+- `logs/health.rs` — per-host request-path health shared by the fan-out and recent-messages: an EWMA of each
+  host's response time sets its probe timeout (instead of one flat 5s for a host that always answers in 40ms),
+  and three consecutive transport failures/5xx trip a breaker that skips the host entirely until a cooldown
+  expires, then lets exactly one trial request through. Only transport errors and 5xx count — a 403/404 is an
+  answer (an opted-out channel returns one routinely) and must never trip the breaker. A tripped instance still
+  contributes whatever is already cached for it; it just stops getting new requests.
 - `logs/mirror.rs` — backs `/list`, `/channel/*`, `/channelid/*`: regex-extracts channel/user from the raw
   incoming URL, ranks via `get_instance`, rewrites the path to use resolved Twitch IDs, and proxies the request
   through.

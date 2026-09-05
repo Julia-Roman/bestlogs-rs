@@ -8,6 +8,7 @@ use moka::future::Cache;
 use crate::config::Config;
 use crate::http_client;
 use crate::logs::channels::InstanceChannels;
+use crate::logs::health::InstanceHealth;
 use crate::logs::search::{SearchIndex, SearchIndexBuilder};
 use crate::logs::{AvailableLogDate, Channel};
 use crate::twitch::TwitchUser;
@@ -180,6 +181,9 @@ impl Caches {
 pub struct AppState {
     pub config: Config,
     pub http: reqwest::Client,
+    /// Per-host request-path health, driving the fan-out's circuit breaking
+    /// and adaptive timeouts (see `logs/health.rs`).
+    pub health: InstanceHealth,
     pub version: String,
     pub commit: String,
     pub caches: Caches,
@@ -192,6 +196,7 @@ impl AppState {
         AppState {
             config,
             http: http_client::build_client(),
+            health: InstanceHealth::new(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             commit: env!("GIT_COMMIT_HASH").to_string(),
             caches: Caches::new(),

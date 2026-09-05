@@ -1,14 +1,41 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
+use crate::logs::health::Permit;
 use crate::logs::{AvailableLogDate, Elapsed};
+use crate::reload;
 use crate::state::AppState;
 use crate::twitch::TwitchUser;
 use crate::util;
-use crate::{http_client, reload};
+
+/// How much longer the fan-out keeps collecting once it has an answer worth
+/// returning.
+///
+/// The instances are probed concurrently, so the useful ones cluster: the
+/// grace window is measured from the first usable reply rather than from the
+/// start of the request, which lets it adapt to the instance mix instead of
+/// assuming one. Every instance that is within this of the quickest to answer
+/// still gets ranked; the ones that are not keep running in the background
+/// and land in the cache, so the next lookup of that channel ranks them too.
+const FANOUT_RESULT_GRACE: Duration = Duration::from_millis(300);
+
+/// Ceiling on the above: however late the first usable answer arrives, an
+/// answerable lookup returns by this point. Instances still pending are left
+/// running, so what this costs is a possibly incomplete ranking for one
+/// request, and what it buys is that one overloaded host can no longer set
+/// the response time of every request that touches it.
+const FANOUT_SOFT_DEADLINE: Duration = Duration::from_millis(1200);
+
+/// The point at which a lookup answers with whatever it has, even nothing.
+/// Above the per-probe ceiling (`http_client::LIST_TIMEOUT`) so that in
+/// normal operation the probes' own timeouts are what bound the fan-out.
+const FANOUT_HARD_DEADLINE: Duration = Duration::from_secs(6);
 
 #[derive(Deserialize)]
 struct ListResponse {
@@ -131,21 +158,43 @@ enum GetLogsOutcome {
     },
 }
 
+/// A `/list` probe for the channel's day count.
+///
+/// Reports the outcome to the health tracker, but only a transport failure
+/// (timeout, refused connection, TLS error) or a 5xx counts against the
+/// instance. A 403/404 is an answer — for an opted-out or unlogged channel a
+/// routine one — and must never trip the breaker.
 async fn fetch_list(
     state: &AppState,
     host: &str,
     channel_path: &str,
     channel_clean: &str,
+    timeout: Duration,
 ) -> anyhow::Result<Arc<Vec<AvailableLogDate>>> {
-    let response = state
+    let started = Instant::now();
+    let response = match state
         .http
         .get(format!("https://{host}/list"))
         .query(&[(channel_path, channel_clean)])
-        .timeout(http_client::LIST_TIMEOUT)
+        .timeout(timeout)
         .send()
-        .await?
-        .error_for_status()?;
-    let body: ListResponse = response.json().await?;
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            state.health.record_failure(host, &err.to_string());
+            return Err(err.into());
+        }
+    };
+
+    let status = response.status();
+    if status.is_server_error() {
+        state.health.record_failure(host, status.as_str());
+        anyhow::bail!("{host} responded with {status}");
+    }
+
+    let body: ListResponse = response.error_for_status()?.json().await?;
+    state.health.record_success(host, started.elapsed());
     Ok(Arc::new(body.available_logs))
 }
 
@@ -156,19 +205,40 @@ async fn fetch_user_status(
     channel_clean: &str,
     user_path: &str,
     user_clean: &str,
+    timeout: Duration,
 ) -> anyhow::Result<u16> {
-    let response = state
+    let started = Instant::now();
+    let response = match state
         .http
         .get(format!("https://{host}/list"))
         .query(&[(channel_path, channel_clean), (user_path, user_clean)])
-        .timeout(http_client::LIST_TIMEOUT)
+        .timeout(timeout)
         .send()
-        .await?;
-    Ok(response.status().as_u16())
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            state.health.record_failure(host, &err.to_string());
+            return Err(err.into());
+        }
+    };
+
+    let status = response.status();
+    if status.is_server_error() {
+        state.health.record_failure(host, status.as_str());
+        anyhow::bail!("{host} responded with {status}");
+    }
+
+    state.health.record_success(host, started.elapsed());
+    Ok(status.as_u16())
 }
 
 /// Resolves this instance's day list for the channel, going through the
 /// shared cache unless the caller forced a refresh.
+///
+/// `None` means the instance cannot contribute to this request at all: its
+/// breaker is open and nothing is cached for the channel.
+#[allow(clippy::too_many_arguments)]
 async fn cached_list(
     state: &AppState,
     host: &str,
@@ -177,8 +247,17 @@ async fn cached_list(
     channel_clean: &str,
     cache_key: String,
     force: bool,
-) -> Arc<Vec<AvailableLogDate>> {
-    let fetch = fetch_list(state, host, channel_path, channel_clean);
+    permit: Permit,
+) -> Option<Arc<Vec<AvailableLogDate>>> {
+    let timeout = match permit {
+        Permit::Fetch(timeout) => timeout,
+        // Tripped: an already-cached list is still perfectly good to rank
+        // with, it just doesn't get refreshed from a host that isn't
+        // answering.
+        Permit::CachedOnly => return state.caches.list_data.get(&cache_key).await,
+    };
+
+    let fetch = fetch_list(state, host, channel_path, channel_clean, timeout);
 
     if force {
         let fetched = match fetch.await {
@@ -193,19 +272,21 @@ async fn cached_list(
             .list_data
             .insert(cache_key, fetched.clone())
             .await;
-        fetched
+        Some(fetched)
     } else {
         match state.caches.list_data.try_get_with(cache_key, fetch).await {
-            Ok(list) => list,
+            Ok(list) => Some(list),
             Err(err) => {
                 error!("[{host}] Failed loading {channel} length: {err}");
-                Arc::new(Vec::new())
+                Some(Arc::new(Vec::new()))
             }
         }
     }
 }
 
-/// The same, for the user-availability probe.
+/// The same, for the user-availability probe. `None` is "not known" — either
+/// the breaker is open with nothing cached, or the probe failed — and leaves
+/// the instance contributing channel logs only.
 #[allow(clippy::too_many_arguments)]
 async fn cached_status(
     state: &AppState,
@@ -218,7 +299,13 @@ async fn cached_status(
     user_clean: &str,
     cache_key: String,
     force: bool,
-) -> u16 {
+    permit: Permit,
+) -> Option<u16> {
+    let timeout = match permit {
+        Permit::Fetch(timeout) => timeout,
+        Permit::CachedOnly => return state.caches.status_codes.get(&cache_key).await,
+    };
+
     let fetch = fetch_user_status(
         state,
         host,
@@ -226,12 +313,13 @@ async fn cached_status(
         channel_clean,
         user_path,
         user_clean,
+        timeout,
     );
 
     if force {
-        let resolved = fetch.await.unwrap_or(500);
+        let resolved = fetch.await.ok()?;
         state.caches.status_codes.insert(cache_key, resolved).await;
-        resolved
+        Some(resolved)
     } else {
         match state
             .caches
@@ -239,10 +327,10 @@ async fn cached_status(
             .try_get_with(cache_key, fetch)
             .await
         {
-            Ok(status) => status,
+            Ok(status) => Some(status),
             Err(err) => {
                 error!("[{host}] Failed checking {channel}/{user} status: {err}");
-                500
+                None
             }
         }
     }
@@ -257,21 +345,25 @@ async fn cached_status(
 /// and a failed probe is never cached — only a genuine answer (including a
 /// genuinely empty list) is, so a timeout or 5xx self-heals on the very
 /// next request rather than being stuck for the rest of the cache's TTL.
+///
+/// Takes owned arguments because `get_instance` spawns this per instance:
+/// a probe that outlives the request's deadline is left running to populate
+/// the cache rather than cancelled.
 async fn get_logs(
-    state: &AppState,
-    key: &str,
-    user: Option<&str>,
-    channel: &str,
+    state: Arc<AppState>,
+    key: String,
+    user: Option<String>,
+    channel: String,
     force: bool,
     pretty: bool,
     banned: bool,
 ) -> GetLogsOutcome {
-    let channel_path = if util::USER_ID_REGEX.is_match(channel) {
+    let channel_path = if util::USER_ID_REGEX.is_match(&channel) {
         "channelid"
     } else {
         "channel"
     };
-    let channel_clean = util::strip_id_prefix(channel);
+    let channel_clean = util::strip_id_prefix(&channel);
 
     // A binary search against the live map entry rather than a scan of it
     // (let alone a cloned-out `Vec`). Every alive instance is probed on
@@ -280,7 +372,7 @@ async fn get_logs(
     // it could touch the network. The guard is dropped before the first
     // `.await` below, so it can't hold a shard lock against `reload`'s
     // writes. See `logs/channels.rs` for how the entry is ordered.
-    let (channel_known, instance_down) = match state.caches.instance_channels.get(key) {
+    let (channel_known, instance_down) = match state.caches.instance_channels.get(&key) {
         Some(entry) => (entry.contains(channel_clean), entry.is_empty()),
         // Not loaded yet: matches the previous `unwrap_or_default()` empty
         // list — nothing known, and reported down for a banned-channel lookup.
@@ -296,7 +388,8 @@ async fn get_logs(
 
     // Only resolved once this instance is actually going to be queried —
     // it allocates, and the two early returns above are the common case.
-    let host = state.instance_host(key);
+    let host = state.instance_host(&key);
+    let permit = state.health.permit(&host);
     let list_cache_key = format!("logs:list:{key}:{}", channel.replacen("id:", "id-", 1));
 
     let channel_full = if pretty {
@@ -307,19 +400,23 @@ async fn get_logs(
 
     let Some(user) = user else {
         let list = cached_list(
-            state,
+            &state,
             &host,
-            channel,
+            &channel,
             channel_path,
             channel_clean,
             list_cache_key,
             force,
+            permit,
         )
         .await;
-        return GetLogsOutcome::ChannelOnly {
-            link: format!("https://{key}"),
-            channel_full,
-            list,
+        return match list {
+            Some(list) => GetLogsOutcome::ChannelOnly {
+                link: format!("https://{key}"),
+                channel_full,
+                list,
+            },
+            None => GetLogsOutcome::Down,
         };
     };
 
@@ -328,12 +425,12 @@ async fn get_logs(
         channel.replacen("id:", "id-", 1),
         user.replacen("id:", "id-", 1)
     );
-    let user_path = if util::USER_ID_REGEX.is_match(user) {
+    let user_path = if util::USER_ID_REGEX.is_match(&user) {
         "userid"
     } else {
         "user"
     };
-    let user_clean = util::strip_id_prefix(user);
+    let user_clean = util::strip_id_prefix(&user);
 
     // The day list and the user-availability probe are independent GETs to
     // the same host, so issue them together. Run sequentially, a cold user
@@ -341,27 +438,33 @@ async fn get_logs(
     // instance set the latency of the whole fan-out.
     let (list, status_code) = tokio::join!(
         cached_list(
-            state,
+            &state,
             &host,
-            channel,
+            &channel,
             channel_path,
             channel_clean,
             list_cache_key,
             force,
+            permit,
         ),
         cached_status(
-            state,
+            &state,
             &host,
-            channel,
+            &channel,
             channel_path,
             channel_clean,
-            user,
+            &user,
             user_path,
             user_clean,
             instance_cache_key,
             force,
+            permit,
         )
     );
+
+    let Some(list) = list else {
+        return GetLogsOutcome::Down;
+    };
 
     let full_link = if pretty {
         format!("https://tv.supa.sh/logs?c={channel}&u={user}")
@@ -369,13 +472,13 @@ async fn get_logs(
         format!("https://{key}/?channel={channel}&username={user}")
     };
 
-    if status_code == 403 {
+    if status_code == Some(403) {
         return GetLogsOutcome::OptedOut {
             link: format!("https://{key}"),
         };
     }
 
-    if status_code / 100 == 2 {
+    if status_code.is_some_and(|status| status / 100 == 2) {
         GetLogsOutcome::Available {
             link: format!("https://{key}"),
             channel_full,
@@ -406,6 +509,7 @@ pub async fn get_instance(
     let mut error = pre_error;
     let mut status: u16 = 200;
     let mut down_sites = 0usize;
+    let mut abandoned = 0usize;
 
     let mut request = RequestInfo {
         channel: None,
@@ -464,42 +568,78 @@ pub async fn get_instance(
 
     if error.is_none() {
         let alive = state.alive_instances();
-        let results = futures::future::join_all(alive.iter().map(|key| {
-            get_logs(
-                state,
-                key,
-                resolved_user.as_deref(),
-                &channel,
-                force,
-                pretty,
-                banned,
-            )
-        }))
-        .await;
+        // Each instance is probed on its own task rather than as one big
+        // `join_all`, so a probe that is still running when the deadline
+        // below expires is *left running* instead of cancelled: it finishes
+        // into the shared cache, and the next request for that channel gets
+        // it for free.
+        let mut probes: FuturesUnordered<_> = alive
+            .iter()
+            .map(|key| {
+                tokio::spawn(get_logs(
+                    state.clone(),
+                    key.to_string(),
+                    resolved_user.clone(),
+                    channel.clone(),
+                    force,
+                    pretty,
+                    banned,
+                ))
+            })
+            .collect();
 
-        for outcome in results {
-            match outcome {
-                GetLogsOutcome::Down => down_sites += 1,
-                GetLogsOutcome::Available {
-                    link,
-                    channel_full,
-                    full,
-                    list,
-                } => {
-                    channel_with_len.push((link.clone(), channel_full, list.clone()));
-                    user_with_len.push((link, full, list));
+        // Until the request has an answer worth returning, the wait is bounded
+        // by the hard deadline; from that point on it is bounded by the grace
+        // window instead. A forced refresh is an explicit "go get me fresh
+        // data" and never arms the grace window, so it waits for everything.
+        let started_at = tokio::time::Instant::now();
+        let soft_deadline = started_at + FANOUT_SOFT_DEADLINE;
+        let mut deadline = Box::pin(tokio::time::sleep_until(started_at + FANOUT_HARD_DEADLINE));
+        let mut grace_armed = force;
+
+        while !probes.is_empty() {
+            tokio::select! {
+                biased;
+
+                Some(joined) = probes.next() => {
+                    match joined {
+                        Ok(GetLogsOutcome::Down) => down_sites += 1,
+                        Ok(GetLogsOutcome::Available { link, channel_full, full, list }) => {
+                            channel_with_len.push((link.clone(), channel_full, list.clone()));
+                            user_with_len.push((link, full, list));
+                        }
+                        Ok(GetLogsOutcome::ChannelOnly { link, channel_full, list }) => {
+                            channel_with_len.push((link, channel_full, list));
+                        }
+                        Ok(GetLogsOutcome::ChannelNotFound) => {}
+                        Ok(GetLogsOutcome::OptedOut { link }) => opt_outs.push(link),
+                        Err(err) => {
+                            down_sites += 1;
+                            error!("[Logs] Instance probe failed: {err}");
+                        }
+                    }
                 }
-                GetLogsOutcome::ChannelOnly {
-                    link,
-                    channel_full,
-                    list,
-                } => {
-                    channel_with_len.push((link, channel_full, list));
-                }
-                GetLogsOutcome::ChannelNotFound => {}
-                GetLogsOutcome::OptedOut { link } => opt_outs.push(link),
+                _ = &mut deadline => break,
+            }
+
+            // Cutting the fan-out short is only worth it once there is an
+            // answer to the question that was actually asked: for a user
+            // lookup, channel logs alone would still report "no user logs
+            // found" while a slow instance was about to say otherwise.
+            let answered = !channel_with_len.is_empty()
+                && (resolved_user.is_none() || !user_with_len.is_empty());
+            if answered && !grace_armed {
+                grace_armed = true;
+                deadline
+                    .as_mut()
+                    .reset((tokio::time::Instant::now() + FANOUT_RESULT_GRACE).min(soft_deadline));
             }
         }
+
+        // Stragglers count as down for this request only — they are still
+        // running, and whatever they return lands in the cache.
+        abandoned = probes.len();
+        down_sites += abandoned;
 
         channel_with_len.sort_by_key(|a| std::cmp::Reverse(a.2.len()));
         user_with_len.sort_by_key(|a| std::cmp::Reverse(a.2.len()));
@@ -546,12 +686,17 @@ pub async fn get_instance(
     }
 
     info!(
-        "[Logs] Channel: {channel}{} | {:.2}ms",
+        "[Logs] Channel: {channel}{} | {:.2}ms{}",
         resolved_user
             .as_ref()
             .map(|u| format!(" - User: {u}"))
             .unwrap_or_default(),
-        start.elapsed().as_secs_f64() * 1000.0
+        start.elapsed().as_secs_f64() * 1000.0,
+        if abandoned > 0 {
+            format!(" | answered without {abandoned} slow instance(s)")
+        } else {
+            String::new()
+        }
     );
 
     let last_updated_ms = state.last_updated_ms();

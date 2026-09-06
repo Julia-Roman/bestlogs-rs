@@ -23,14 +23,14 @@ use crate::util;
 /// assuming one. Every instance that is within this of the quickest to answer
 /// still gets ranked; the ones that are not keep running in the background
 /// and land in the cache, so the next lookup of that channel ranks them too.
-const FANOUT_RESULT_GRACE: Duration = Duration::from_millis(300);
+const FANOUT_RESULT_GRACE: Duration = Duration::from_secs(1);
 
 /// Ceiling on the above: however late the first usable answer arrives, an
 /// answerable lookup returns by this point. Instances still pending are left
 /// running, so what this costs is a possibly incomplete ranking for one
 /// request, and what it buys is that one overloaded host can no longer set
 /// the response time of every request that touches it.
-const FANOUT_SOFT_DEADLINE: Duration = Duration::from_millis(1200);
+const FANOUT_SOFT_DEADLINE: Duration = Duration::from_secs(2);
 
 /// The point at which a lookup answers with whatever it has, even nothing.
 /// Above the per-probe ceiling (`http_client::LIST_TIMEOUT`) so that in

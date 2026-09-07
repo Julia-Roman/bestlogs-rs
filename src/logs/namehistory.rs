@@ -46,6 +46,13 @@ pub async fn get_name_history(
         );
     };
 
+    if state.config.hidden_namehistory_ids.contains(&user_id) {
+        return Ok(NameHistoryResult {
+            source_instances: Vec::new(),
+            name_history: Vec::new(),
+        });
+    }
+
     let instances = state.alive_instances();
     let results: Vec<(String, Option<Vec<PreviousName>>)> =
         futures::future::join_all(instances.iter().map(|key| {

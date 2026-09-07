@@ -72,6 +72,7 @@
     "intervalSeconds": 10,
     "trustProxy": false
   },
+  "hiddenNamehistoryIds": [],
   "umamiStats": {
     "token": "",
     "id": "",

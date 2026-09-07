@@ -158,8 +158,10 @@
               description = ''
                 Path to a systemd `EnvironmentFile` (`KEY=value` lines) holding
                 secrets that must not end up in `settings`, since that is
-                serialised into the world-readable Nix store. Currently only
-                `BESTLOGS_UMAMI_TOKEN`, which overrides `umamiStats.token`.
+                serialised into the world-readable Nix store:
+                `BESTLOGS_UMAMI_TOKEN`, which overrides `umamiStats.token`, and
+                `BESTLOGS_HIDDEN_NAMEHISTORY_IDS`, a comma-separated list of
+                user IDs added to `hiddenNamehistoryIds`.
 
                 Read by systemd itself before privileges are dropped, so the
                 file can stay root-owned despite `DynamicUser`.

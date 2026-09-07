@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +11,11 @@ const DEFAULT_CONFIG_JSON: &str = include_str!("../example_config.json");
 /// deployment can keep it out of `config.json` (and out of the world-readable
 /// Nix store) and hand it over via a systemd `EnvironmentFile` instead.
 const UMAMI_TOKEN_ENV: &str = "BESTLOGS_UMAMI_TOKEN";
+
+/// Comma-separated user IDs, merged into `hiddenNamehistoryIds`. Lets a
+/// deployment honor a removal request without rewriting (and publishing) a
+/// `config.json` that names the person being hidden.
+const HIDDEN_NAMEHISTORY_ENV: &str = "BESTLOGS_HIDDEN_NAMEHISTORY_IDS";
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct InstanceMeta {
@@ -100,6 +107,10 @@ pub struct Config {
     pub recentmessages_instances: IndexMap<String, RecentMessagesInstanceMeta>,
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    /// Twitch user IDs whose `/namehistory` lookups always answer with an
+    /// empty array, whether asked for by ID or by `login:`.
+    #[serde(default)]
+    pub hidden_namehistory_ids: HashSet<String>,
     pub umami_stats: Option<UmamiConfig>,
 }
 
@@ -115,7 +126,10 @@ impl Config {
     /// service down.
     ///
     /// `BESTLOGS_UMAMI_TOKEN`, if set, wins over whatever `umamiStats.token`
-    /// the merged config ended up with.
+    /// the merged config ended up with, and `BESTLOGS_HIDDEN_NAMEHISTORY_IDS`
+    /// adds to `hiddenNamehistoryIds` (it adds rather than replaces: both
+    /// sources describe people who asked not to be listed, so neither should
+    /// be able to un-hide the other's entries).
     pub fn load() -> Config {
         let defaults: serde_json::Value = serde_json::from_str(DEFAULT_CONFIG_JSON)
             .expect("built-in example_config.json must be valid JSON");
@@ -166,6 +180,15 @@ impl Config {
                 "{UMAMI_TOKEN_ENV} is set but there is no umamiStats block to apply it to"
             ),
             (Err(_), _) => {}
+        }
+
+        if let Ok(ids) = std::env::var(HIDDEN_NAMEHISTORY_ENV) {
+            config.hidden_namehistory_ids.extend(
+                ids.split(',')
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned),
+            );
         }
 
         config

@@ -85,8 +85,10 @@ commit) before `nix build`/`nix flake check` will pick them up.
   `axum::serve`. The server starts accepting connections before the first channel-list load completes.
 - `config.rs` — `Config::load()` is infallible: `example_config.json` is compiled in via `include_str!` as the
   always-available default; `config.json` in the cwd, if valid, is merged over it key-by-key at the top level.
-  The one env override is `BESTLOGS_UMAMI_TOKEN`, which wins over `umamiStats.token` so the credential can be
-  supplied out-of-band (systemd `EnvironmentFile`) instead of living in a checked-in/Nix-store `config.json`.
+  Two env overrides exist so sensitive values can be supplied out-of-band (systemd `EnvironmentFile`) instead of
+  living in a checked-in/Nix-store `config.json`: `BESTLOGS_UMAMI_TOKEN` wins over `umamiStats.token`, and
+  `BESTLOGS_HIDDEN_NAMEHISTORY_IDS` (comma-separated user IDs) is *added to* `hiddenNamehistoryIds` — those IDs
+  get an empty array from `/namehistory` whether looked up by ID or by `login:`.
 - `state.rs` — `AppState` (one `Arc<AppState>` for the process) holds the shared `reqwest::Client`, config, and
   `Caches`. Two different caching mechanisms coexist:
   - `instance_channels`/`unique_channels` (`DashMap`): each justlog/rustlog instance's channel list, refreshed by

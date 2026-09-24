@@ -73,6 +73,7 @@
     "trustProxy": false
   },
   "hiddenNamehistoryIds": [],
+  "forceIpv4": false,
   "umamiStats": {
     "token": "",
     "id": "",

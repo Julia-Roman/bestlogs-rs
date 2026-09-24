@@ -111,6 +111,10 @@ pub struct Config {
     /// empty array, whether asked for by ID or by `login:`.
     #[serde(default)]
     pub hidden_namehistory_ids: HashSet<String>,
+    /// Resolve upstream hosts to IPv4 addresses only, for hosts whose IPv6
+    /// route is broken or blocked.
+    #[serde(default)]
+    pub force_ipv4: bool,
     pub umami_stats: Option<UmamiConfig>,
 }
 

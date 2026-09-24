@@ -194,8 +194,8 @@ pub struct AppState {
 impl AppState {
     pub fn new(config: Config) -> AppState {
         AppState {
+            http: http_client::build_client(config.force_ipv4),
             config,
-            http: http_client::build_client(),
             health: InstanceHealth::new(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             commit: env!("GIT_COMMIT_HASH").to_string(),

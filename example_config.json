@@ -45,7 +45,7 @@
     "logs.folhinhabot.com": {
       "maintainer": "Leafyzito"
     },
-    "logxx.dev": {
+    "logs.cyex.app": {
       "maintainer": "seryxx"
     },
     "logs.mrchuw.com.br": {
@@ -56,7 +56,10 @@
     },
     "logs.jimmyboy.dev": {
       "maintainer": "devJimmyboy"
-    }
+    },
+		"logs.lotuslabs.dev": {
+			"maintainer": "IPQow"
+		}
   },
   "recentmessagesInstances": {
     "recent-messages.zneix.eu": {

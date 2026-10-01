@@ -134,7 +134,6 @@ pub async fn health(State(state): State<Arc<AppState>>, headers: HeaderMap, uri:
             "instancesStats": { "count": count, "down": down },
             "instances": instances,
             "channels": channel_count,
-            "instance": state.config.instance,
         }),
     )
 }

@@ -42,7 +42,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-use crate::config::{Config, InstanceMeta, JustlogInstanceMeta, RateLimitConfig};
+use crate::config::{Config, JustlogInstanceMeta, RateLimitConfig};
 use crate::logs::instance::get_instance;
 use crate::logs::{Channel, channels::InstanceChannels};
 use crate::state::AppState;
@@ -463,7 +463,6 @@ async fn main() {
 
     let config = Config {
         port: 0,
-        instance: InstanceMeta::default(),
         justlogs_instances: instances,
         recentmessages_instances: indexmap::IndexMap::new(),
         rate_limit: RateLimitConfig::default(),

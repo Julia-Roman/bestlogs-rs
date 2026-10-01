@@ -1,15 +1,10 @@
 <script lang="ts">
 	import { loadMeta, metaState } from '$lib/meta.svelte';
 	import Card from '$lib/components/Card.svelte';
-	import { ArrowRight, ExternalLink, MapPin } from '@lucide/svelte';
+	import { ArrowRight, ExternalLink } from '@lucide/svelte';
 	import { resolve } from '$app/paths';
 
 	loadMeta();
-
-	const instance = $derived(metaState.value?.instance ?? null);
-	const location = $derived(
-		instance ? [instance.city, instance.country].filter(Boolean).join(', ') : ''
-	);
 </script>
 
 <svelte:head>
@@ -86,41 +81,4 @@
 			</div>
 		</Card>
 	</section>
-
-	{#if instance}
-		<section class="mt-4">
-			<Card class="flex flex-col items-center gap-4 text-center sm:flex-row sm:text-left">
-				{#if instance.flag}
-					<img
-						src={`https://flagcdn.com/${instance.flag.toLowerCase()}.svg`}
-						width="72"
-						draggable="false"
-						title={location}
-						alt={location}
-						class="rounded-md ring-1 ring-line"
-					/>
-				{/if}
-				<div class="flex-1">
-					<h2 class="text-lg font-bold text-fg">Proxy Instance</h2>
-					{#if location}
-						<p
-							class="mt-1 flex items-center justify-center gap-1.5 text-sm text-fg-muted sm:justify-start"
-						>
-							<MapPin class="h-4 w-4" />
-							{location}
-						</p>
-					{/if}
-				</div>
-				{#if instance.url}
-					<a
-						href={`https://${instance.url}`}
-						class="inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-sm font-medium text-fg-muted transition hover:bg-overlay"
-					>
-						{instance.url}
-						<ExternalLink class="h-3.5 w-3.5" />
-					</a>
-				{/if}
-			</Card>
-		</section>
-	{/if}
 </div>

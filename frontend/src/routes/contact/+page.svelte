@@ -23,7 +23,7 @@
 <div class="mx-auto max-w-3xl px-4 py-16 sm:px-6">
 	<h1 class="mb-10 text-center text-3xl font-extrabold tracking-tight text-fg">Contact</h1>
 
-	<div class="grid gap-5 sm:grid-cols-2">
+	<div class="mx-auto max-w-sm">
 		{#if contact?.creator}
 			<Card class="flex flex-col items-center gap-3 text-center">
 				<Avatar.Root class="h-24 w-24 overflow-hidden rounded-full ring-2 ring-brand-500/40">
@@ -66,34 +66,6 @@
 					</a>
 				</div>
 				<p class="text-sm text-fg-muted">Contact me for questions or suggestions :P</p>
-			</Card>
-		{/if}
-
-		{#if contact?.maintainer?.name}
-			<Card class="flex flex-col items-center gap-3 text-center">
-				<Avatar.Root class="h-24 w-24 overflow-hidden rounded-full ring-2 ring-brand-500/40">
-					<Avatar.Image
-						src={contact.maintainer.avatar}
-						alt={contact.maintainer.name}
-						class="h-full w-full object-cover"
-					/>
-					<Avatar.Fallback
-						class="flex h-full w-full items-center justify-center bg-overlay text-fg-subtle"
-					>
-						<User class="h-8 w-8" />
-					</Avatar.Fallback>
-				</Avatar.Root>
-				<h2 class="text-xl font-bold text-fg">{contact.maintainer.name}</h2>
-				<a
-					href={`https://twitch.tv/${contact.maintainer.name}`}
-					aria-label="Twitch"
-					class="text-fg-muted transition hover:text-accent"
-				>
-					<BrandIcon name="twitch" />
-				</a>
-				{#if contact.maintainer.message}
-					<p class="text-sm text-fg-muted">{contact.maintainer.message}</p>
-				{/if}
 			</Card>
 		{/if}
 	</div>

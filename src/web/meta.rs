@@ -22,7 +22,6 @@ pub async fn meta(State(state): State<Arc<AppState>>) -> Response {
         "version": state.version,
         "commit": state.commit,
         "instances": state.config.justlogs_instances.keys().collect::<Vec<_>>(),
-        "instance": state.config.instance,
         "umami": umami,
     }))
     .into_response()
@@ -42,32 +41,7 @@ pub async fn contact(State(state): State<Arc<AppState>>) -> Response {
         }
     };
 
-    let has_instance = state.config.instance.maintainer.is_some()
-        || state.config.instance.message.is_some()
-        || state.config.instance.country.is_some()
-        || state.config.instance.city.is_some()
-        || state.config.instance.flag.is_some()
-        || state.config.instance.url.is_some();
-
-    let maintainer = if has_instance {
-        let mut merged = serde_json::to_value(&state.config.instance).unwrap_or_else(|_| json!({}));
-
-        if let Some(maintainer_login) = &state.config.instance.maintainer
-            && let Ok(info) = get_info(&state, maintainer_login).await
-            && let serde_json::Value::Object(map) = &mut merged
-        {
-            map.insert("name".to_string(), json!(info.name));
-            map.insert("login".to_string(), json!(info.login));
-            map.insert("avatar".to_string(), json!(info.avatar));
-            map.insert("id".to_string(), json!(info.id));
-        }
-
-        Some(merged)
-    } else {
-        None
-    };
-
-    Json(json!({ "creator": creator, "maintainer": maintainer })).into_response()
+    Json(json!({ "creator": creator })).into_response()
 }
 
 pub async fn status(State(state): State<Arc<AppState>>) -> Response {

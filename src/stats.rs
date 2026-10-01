@@ -54,7 +54,6 @@ pub fn spawn_stats(
         .get(axum::http::header::REFERER)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
-        .or_else(|| state.config.instance.url.clone())
         .unwrap_or_default();
     let url = url.to_string();
     let name = name.to_string();

@@ -18,16 +18,6 @@ const UMAMI_TOKEN_ENV: &str = "BESTLOGS_UMAMI_TOKEN";
 const HIDDEN_NAMEHISTORY_ENV: &str = "BESTLOGS_HIDDEN_NAMEHISTORY_IDS";
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct InstanceMeta {
-    pub maintainer: Option<String>,
-    pub message: Option<String>,
-    pub country: Option<String>,
-    pub city: Option<String>,
-    pub flag: Option<String>,
-    pub url: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct JustlogInstanceMeta {
     pub maintainer: Option<String>,
     /// Optional alternate hostname to actually connect to, while the outer
@@ -99,8 +89,6 @@ pub struct UmamiConfig {
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     pub port: u16,
-    #[serde(default)]
-    pub instance: InstanceMeta,
     #[serde(default)]
     pub justlogs_instances: IndexMap<String, JustlogInstanceMeta>,
     #[serde(default)]

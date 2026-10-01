@@ -1,12 +1,3 @@
-export interface InstanceMeta {
-	maintainer?: string;
-	message?: string;
-	country?: string;
-	city?: string;
-	flag?: string;
-	url?: string;
-}
-
 export interface UmamiMeta {
 	url: string;
 	id: string;
@@ -16,7 +7,6 @@ export interface Meta {
 	version: string;
 	commit: string;
 	instances: string[];
-	instance: InstanceMeta;
 	umami: UmamiMeta | null;
 }
 
@@ -29,7 +19,6 @@ export interface PersonInfo {
 
 export interface ContactMeta {
 	creator: PersonInfo;
-	maintainer: (InstanceMeta & Partial<PersonInfo>) | null;
 }
 
 export interface StatusInstance {

@@ -1,13 +1,5 @@
 {
   "port": 2028,
-  "instance": {
-    "maintainer": "Anonymous",
-    "message": "Contact me for updates!",
-    "country": "Unknown",
-    "city": "Unknown",
-    "flag": "US",
-    "url": "logs.zonian.dev"
-  },
   "justlogsInstances": {
     "logs.spanix.team": {
       "maintainer": "ZonianMidian"

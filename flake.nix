@@ -143,7 +143,6 @@
               default = { };
               example = {
                 port = 2028;
-                instance.maintainer = "yourname";
               };
               description = ''
                 Contents of config.json (see example_config.json for the full

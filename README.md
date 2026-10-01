@@ -71,7 +71,6 @@ The flake exports a NixOS module (`nixosModules.default`) that runs Best Logs as
             openFirewall = true;
             settings = {
               port = 2028;
-              instance.maintainer = "yourname";
               # ...see example_config.json for the full schema
             };
           };

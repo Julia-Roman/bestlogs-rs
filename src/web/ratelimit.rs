@@ -94,10 +94,23 @@ impl RateLimiter {
     }
 }
 
+/// Loopback, private (RFC 1918 / IPv6 ULA) and link-local addresses.
+/// IPv4-mapped IPv6 peers (dual-stack sockets) are unwrapped first.
+fn is_local(address: IpAddr) -> bool {
+    match address.to_canonical() {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
+    }
+}
+
 fn forwarded_address(headers: &HeaderMap) -> Option<IpAddr> {
     let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
 
+    // Proxies append to X-Forwarded-For, so everything left of the last
+    // entry was supplied by the client and can't be trusted; the last one is
+    // the peer our own proxy actually saw.
     let candidate = header("x-forwarded-for")
+        .and_then(|chain| chain.rsplit(',').next())
         .or_else(|| header("x-real-ip"))
         .or_else(|| header("cf-connecting-ip").and_then(|chain| chain.split(',').next()))?;
 
@@ -120,6 +133,10 @@ pub async fn limit(
     next: Next,
 ) -> Response {
     let address = limiter.client_address(&headers, peer);
+
+    if is_local(address) {
+        return next.run(request).await;
+    }
 
     match limiter.check(address).await {
         Ok(()) => next.run(request).await,

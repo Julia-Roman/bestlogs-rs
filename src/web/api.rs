@@ -465,6 +465,12 @@ pub async fn mirror(State(state): State<Arc<AppState>>, headers: HeaderMap, uri:
             {
                 response.headers_mut().insert(header::CONTENT_LENGTH, value);
             }
+            if response.status().is_success() {
+                response.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    header::HeaderValue::from_static("public, max-age=60, s-maxage=60"),
+                );
+            }
             with_source(response, &source)
         }
     }

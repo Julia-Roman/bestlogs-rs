@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -58,7 +58,7 @@ impl RateLimiter {
     async fn check(&self, address: IpAddr) -> Result<(), Duration> {
         let bucket = self
             .buckets
-            .get_with(address, async {
+            .get_with(bucket_key(address), async {
                 Arc::new(Mutex::new(Bucket {
                     tokens: self.capacity,
                     updated: Instant::now(),
@@ -91,6 +91,18 @@ impl RateLimiter {
         }
 
         forwarded_address(headers).unwrap_or_else(|| peer.ip())
+    }
+}
+
+/// The address a request is charged against. IPv6 is grouped by /64, the
+/// smallest prefix ISPs and hosting providers hand out: anyone holding one
+/// can pick a fresh address per request, so per-address buckets would let
+/// them sidestep the limit entirely. IPv4-mapped addresses are unwrapped
+/// first, or every one of them would share the single ::ffff:0:0/64 bucket.
+fn bucket_key(address: IpAddr) -> IpAddr {
+    match address.to_canonical() {
+        IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from_bits(v6.to_bits() & !0u128 << 64)),
+        v4 => v4,
     }
 }
 
@@ -141,5 +153,26 @@ pub async fn limit(
     match limiter.check(address).await {
         Ok(()) => next.run(request).await,
         Err(retry_after) => too_many_requests(retry_after),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(address: &str) -> IpAddr {
+        bucket_key(address.parse().unwrap())
+    }
+
+    #[test]
+    fn ipv6_shares_a_bucket_per_64() {
+        assert_eq!(key("2001:db8:1:2:aaaa::1"), key("2001:db8:1:2:ffff::9"));
+        assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
+    }
+
+    #[test]
+    fn ipv4_keeps_its_own_bucket() {
+        assert_eq!(key("::ffff:203.0.113.7"), key("203.0.113.7"));
+        assert_ne!(key("::ffff:203.0.113.7"), key("::ffff:203.0.113.8"));
     }
 }

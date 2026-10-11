@@ -135,7 +135,7 @@ commit) before `nix build`/`nix flake check` will pick them up.
 - `web/` — route wiring (`mod.rs`), the public API handlers (`api.rs`), the new `/meta*` JSON endpoints that
   exist purely to feed the SvelteKit frontend (`meta.rs`, deliberately namespaced away from the public API so
   they can't collide with a real channel named e.g. `status`), and the embedded-frontend fallback handler
-  (`static_files.rs`). `ratelimit.rs` is a per-IP token bucket applied with `route_layer` to the log-lookup
+  (`static_files.rs`). `ratelimit.rs` is a per-IP token bucket (IPv6 keyed by /64) applied with `route_layer` to the log-lookup
   routes only (`/api/*`, `/rdr/*`, `/list`, `/channel/*`, `/channelid/*`) — recent-messages is deliberately
   exempt, since Chatterino opens one request per joined channel on connect. It reads `rateLimit` from the
   config (`enabled`, `events`, `intervalSeconds`, `trustProxy`); with `trustProxy` off (the default) only the

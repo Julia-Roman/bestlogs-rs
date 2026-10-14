@@ -393,7 +393,7 @@ async fn get_logs(
     let list_cache_key = format!("logs:list:{key}:{}", channel.replacen("id:", "id-", 1));
 
     let channel_full = if pretty {
-        format!("https://tv.supa.sh/logs?c={channel}")
+        format!("https://lurkology.com/logs?c={channel}")
     } else {
         format!("https://{key}/?channel={channel}")
     };
@@ -467,7 +467,7 @@ async fn get_logs(
     };
 
     let full_link = if pretty {
-        format!("https://tv.supa.sh/logs?c={channel}&u={user}")
+        format!("https://lurkology.com/logs?c={channel}&u={user}")
     } else {
         format!("https://{key}/?channel={channel}&username={user}")
     };

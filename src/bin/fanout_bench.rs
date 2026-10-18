@@ -466,6 +466,8 @@ async fn main() {
         justlogs_instances: instances,
         recentmessages_instances: indexmap::IndexMap::new(),
         rate_limit: RateLimitConfig::default(),
+        hidden_namehistory_ids: Default::default(),
+        force_ipv4: false,
         umami_stats: None,
     };
     let state = Arc::new(AppState::new(config));

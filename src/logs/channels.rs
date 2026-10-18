@@ -56,6 +56,13 @@ impl InstanceChannels {
                 .is_ok()
     }
 
+    pub fn find_login(&self, login: &str) -> Option<&Channel> {
+        self.channels
+            .binary_search_by(|c| c.name.as_str().cmp(login))
+            .ok()
+            .map(|i| &self.channels[i])
+    }
+
     pub fn is_empty(&self) -> bool {
         self.channels.is_empty()
     }

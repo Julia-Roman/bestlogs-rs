@@ -386,21 +386,19 @@ async fn cached_status(
 /// Takes owned arguments because `get_instance` spawns this per instance:
 /// a probe that outlives the request's deadline is left running to populate
 /// the cache rather than cancelled.
+#[allow(clippy::too_many_arguments)]
 async fn get_logs(
     state: Arc<AppState>,
     key: String,
     user: Option<String>,
     channel: String,
+    channel_id: String,
     force: bool,
     pretty: bool,
     banned: bool,
 ) -> GetLogsOutcome {
-    let channel_path = if util::USER_ID_REGEX.is_match(&channel) {
-        "channelid"
-    } else {
-        "channel"
-    };
-    let channel_clean = util::strip_id_prefix(&channel);
+    let channel_path = "channelid";
+    let channel_clean = channel_id.as_str();
 
     // A binary search against the live map entry rather than a scan of it
     // (let alone a cloned-out `Vec`). Every alive instance is probed on
@@ -427,7 +425,7 @@ async fn get_logs(
     // it allocates, and the two early returns above are the common case.
     let host = state.instance_host(&key);
     let permit = state.health.permit(&host);
-    let list_cache_key = format!("logs:list:{key}:{}", channel.replacen("id:", "id-", 1));
+    let list_cache_key = format!("logs:list:{key}:id-{channel_id}");
 
     let channel_full = if pretty {
         format!("https://lurkology.com/logs?c={channel}")
@@ -458,8 +456,7 @@ async fn get_logs(
     };
 
     let instance_cache_key = format!(
-        "logs:instance:{key}:{}:{}",
-        channel.replacen("id:", "id-", 1),
+        "logs:instance:{key}:id-{channel_id}:{}",
         user.replacen("id:", "id-", 1)
     );
     let user_path = if util::USER_ID_REGEX.is_match(&user) {
@@ -528,8 +525,9 @@ async fn get_logs(
     }
 }
 
-/// Port of `Utils.getInstance`: resolves the channel (and optional user) via
-/// api.ivr.fi, ranks every alive instance by log-day count, and assembles
+/// Port of `Utils.getInstance`: resolves the channel (and optional user) from
+/// the instances' channel lists or Twitch GQL, ranks every alive instance by
+/// log-day count, and assembles
 /// the same aggregate response shape as the original.
 pub async fn get_instance(
     state: &Arc<AppState>,
@@ -555,20 +553,37 @@ pub async fn get_instance(
         reload::load_instance_channels(state, false).await;
     }
 
-    // Channel and (if any) user are independent lookups against ivr.fi, so
-    // resolve them concurrently instead of one after the other.
-    let (channel_info, user_info) = tokio::join!(crate::twitch::get_info(state, channel), async {
-        match user {
-            Some(u) => Some(crate::twitch::get_info(state, u).await),
-            None => None,
+    // A channel some instance already lists is resolved from that list, so
+    // only channels nobody logs cost a Twitch lookup. The lists don't say
+    // whether a channel is banned, which is why the fan-out below asks the
+    // instances by id: that works for a banned channel, a login doesn't.
+    let known = state.known_channel(channel);
+    let (channel_info, user_info) = tokio::join!(
+        async {
+            match known {
+                Some(c) => Some(RequestPersonInfo {
+                    login: c.name,
+                    id: c.user_id,
+                    banned: false,
+                }),
+                None => crate::twitch::get_info(state, channel)
+                    .await
+                    .ok()
+                    .map(|info| (&info).into()),
+            }
+        },
+        async {
+            match user {
+                Some(u) => Some(crate::twitch::get_info(state, u).await),
+                None => None,
+            }
         }
-    });
-    let channel_info = channel_info.ok();
+    );
 
     let mut channel = channel.to_string();
     let mut banned = false;
     if let Some(info) = &channel_info {
-        request.channel = Some(info.into());
+        request.channel = Some(info.clone());
         banned = info.banned;
         if info.banned {
             channel = format!("id:{}", info.id);
@@ -601,6 +616,10 @@ pub async fn get_instance(
     let mut channel_with_len: Vec<RankedInstance> = Vec::new();
 
     if error.is_none() {
+        let channel_id = channel_info
+            .as_ref()
+            .map(|info| info.id.clone())
+            .unwrap_or_default();
         let alive = state.alive_instances();
         // Each instance is probed on its own task rather than as one big
         // `join_all`, so a probe that is still running when the deadline
@@ -615,6 +634,7 @@ pub async fn get_instance(
                     key.to_string(),
                     resolved_user.clone(),
                     channel.clone(),
+                    channel_id.clone(),
                     force,
                     pretty,
                     banned,

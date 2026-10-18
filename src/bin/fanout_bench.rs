@@ -472,7 +472,7 @@ async fn main() {
     };
     let state = Arc::new(AppState::new(config));
 
-    // Channel lists and Twitch resolution are what `reload.rs` and ivr.fi
+    // Channel lists and Twitch resolution are what `reload.rs` and Twitch GQL
     // would provide; seeded directly so the benchmark exercises the fan-out
     // and nothing else.
     let logins: Vec<String> = (0..CHANNELS).map(|i| format!("chan{i}")).collect();

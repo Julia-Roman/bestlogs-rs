@@ -228,6 +228,22 @@ impl AppState {
     ///
     /// Borrowed from the config rather than cloned: this runs once per
     /// lookup and the keys outlive any single request.
+    /// Resolves a login or `id:` reference from the instances' own channel
+    /// lists, without asking Twitch. The lists carry no ban status.
+    pub fn known_channel(&self, channel: &str) -> Option<Channel> {
+        if util::USER_ID_REGEX.is_match(channel) {
+            return self
+                .caches
+                .unique_channels
+                .get(util::strip_id_prefix(channel))
+                .map(|entry| entry.clone());
+        }
+        self.caches
+            .instance_channels
+            .iter()
+            .find_map(|entry| entry.find_login(channel).cloned())
+    }
+
     pub fn alive_instances(&self) -> Vec<&str> {
         self.config
             .justlogs_instances

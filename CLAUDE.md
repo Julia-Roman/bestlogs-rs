@@ -100,7 +100,7 @@ commit) before `nix build`/`nix flake check` will pick them up.
     lookup), with a sorted `u32` index alongside it for `id:`-style references. `/instances` therefore
     serializes channels in login order rather than the instance's own; nothing depends on that ordering.
   - `list_data`/`status_codes`/`info_data` (`moka::future::Cache`, TTL'd): per-channel/user probe results and
-    ivr.fi user lookups. These use `try_get_with` so concurrent requests for the same key coalesce into one
+    Twitch GQL user lookups. These use `try_get_with` so concurrent requests for the same key coalesce into one
     upstream fetch instead of each firing a duplicate; **failed** probes are deliberately never cached (only a
     genuine answer, including a genuinely-empty one, is), so a timeout/5xx self-heals on the next request rather
     than being stuck for the rest of the TTL.

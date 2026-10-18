@@ -134,14 +134,14 @@ fn tag_historical(lines: Vec<String>, first_ts: Option<i64>) -> Vec<String> {
 async fn fetch_rustlog_day(
     state: &AppState,
     instance_link: &str,
-    channel: &str,
+    channel_id: &str,
     date: &AvailableLogDate,
     limit: usize,
     first_ts: Option<i64>,
 ) -> anyhow::Result<Vec<String>> {
     let day = date.day.as_deref().unwrap_or("1");
     let url = format!(
-        "{instance_link}/channel/{channel}/{}/{}/{day}?limit={limit}&raw&reverse",
+        "{instance_link}/channelid/{channel_id}/{}/{}/{day}?limit={limit}&raw&reverse",
         date.year, date.month
     );
 
@@ -239,6 +239,12 @@ pub async fn get_recent_messages(
 
     if !rm_only {
         let logs = get_instance(state, channel, None, false, false, None).await;
+        let channel_id = logs
+            .request
+            .channel
+            .as_ref()
+            .map(|c| c.id.clone())
+            .unwrap_or_default();
 
         let mut instances = logs.channel_logs.instances.clone();
         if let Some(first_key) = state.config.justlogs_instances.keys().next() {
@@ -275,7 +281,7 @@ pub async fn get_recent_messages(
                     match fetch_rustlog_day(
                         state,
                         &instance_link,
-                        channel,
+                        &channel_id,
                         &list[days_fetched],
                         limit - total,
                         first_ts,

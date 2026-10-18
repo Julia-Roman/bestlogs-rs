@@ -390,7 +390,7 @@ async fn cached_status(
 async fn get_logs(
     state: Arc<AppState>,
     key: String,
-    user: Option<String>,
+    user: Option<(String, String)>,
     channel: String,
     channel_id: String,
     force: bool,
@@ -433,7 +433,7 @@ async fn get_logs(
         format!("https://{key}/?channel={channel}")
     };
 
-    let Some(user) = user else {
+    let Some((user, user_id)) = user else {
         let list = cached_list(
             &state,
             &host,
@@ -455,16 +455,9 @@ async fn get_logs(
         };
     };
 
-    let instance_cache_key = format!(
-        "logs:instance:{key}:id-{channel_id}:{}",
-        user.replacen("id:", "id-", 1)
-    );
-    let user_path = if util::USER_ID_REGEX.is_match(&user) {
-        "userid"
-    } else {
-        "user"
-    };
-    let user_clean = util::strip_id_prefix(&user);
+    let instance_cache_key = format!("logs:instance:{key}:id-{channel_id}:id-{user_id}");
+    let user_path = "userid";
+    let user_clean = user_id.as_str();
 
     // The day list and the user-availability probe are independent GETs to
     // the same host, so issue them together. Run sequentially, a cold user
@@ -620,6 +613,10 @@ pub async fn get_instance(
             .as_ref()
             .map(|info| info.id.clone())
             .unwrap_or_default();
+        // Named for the links, probed by id like the channel.
+        let probe_user = resolved_user
+            .clone()
+            .zip(request.user.as_ref().map(|info| info.id.clone()));
         let alive = state.alive_instances();
         // Each instance is probed on its own task rather than as one big
         // `join_all`, so a probe that is still running when the deadline
@@ -632,7 +629,7 @@ pub async fn get_instance(
                 tokio::spawn(get_logs(
                     state.clone(),
                     key.to_string(),
-                    resolved_user.clone(),
+                    probe_user.clone(),
                     channel.clone(),
                     channel_id.clone(),
                     force,

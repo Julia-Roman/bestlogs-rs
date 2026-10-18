@@ -123,11 +123,27 @@ pub struct InstanceResult {
     pub opted_out: OptedOut,
     pub last_updated: LastUpdated,
     pub elapsed: Elapsed,
+    /// Each ranked instance's channel day list, index-aligned with
+    /// `channel_logs.instances`.
+    #[serde(skip)]
+    pub channel_lists: Vec<Arc<Vec<AvailableLogDate>>>,
+    /// Each ranked instance's user month list, index-aligned with
+    /// `user_logs.instances`.
+    #[serde(skip)]
+    pub user_lists: Vec<Arc<Vec<AvailableLogDate>>>,
 }
 
 /// One instance's ranking entry: its display link, the user-facing full
 /// link, and the shared date list its rank is derived from.
 type RankedInstance = (String, String, Arc<Vec<AvailableLogDate>>);
+
+/// A user-availability probe's answer: the status, plus the months the user
+/// has logs for when it was a 2xx.
+#[derive(Clone)]
+pub struct UserProbe {
+    pub status: u16,
+    pub months: Arc<Vec<AvailableLogDate>>,
+}
 
 /// Outcome of probing a single instance for a channel (and optionally a
 /// user)'s logs. An enum instead of a status code + loosely-related
@@ -155,6 +171,7 @@ enum GetLogsOutcome {
         channel_full: String,
         full: String,
         list: Arc<Vec<AvailableLogDate>>,
+        months: Arc<Vec<AvailableLogDate>>,
     },
 }
 
@@ -206,7 +223,7 @@ async fn fetch_user_status(
     user_path: &str,
     user_clean: &str,
     timeout: Duration,
-) -> anyhow::Result<u16> {
+) -> anyhow::Result<UserProbe> {
     let started = Instant::now();
     let response = match state
         .http
@@ -229,8 +246,24 @@ async fn fetch_user_status(
         anyhow::bail!("{host} responded with {status}");
     }
 
+    // The body is the same `availableLogs` shape as a channel probe, only
+    // by month. A 2xx with a body that doesn't parse still means the user is
+    // logged there, so it is not allowed to turn into a failure.
+    let months = if status.is_success() {
+        response
+            .json::<ListResponse>()
+            .await
+            .map(|body| body.available_logs)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     state.health.record_success(host, started.elapsed());
-    Ok(status.as_u16())
+    Ok(UserProbe {
+        status: status.as_u16(),
+        months: Arc::new(months),
+    })
 }
 
 /// Resolves this instance's day list for the channel, going through the
@@ -300,7 +333,7 @@ async fn cached_status(
     cache_key: String,
     force: bool,
     permit: Permit,
-) -> Option<u16> {
+) -> Option<UserProbe> {
     let timeout = match permit {
         Permit::Fetch(timeout) => timeout,
         Permit::CachedOnly => return state.caches.status_codes.get(&cache_key).await,
@@ -318,7 +351,11 @@ async fn cached_status(
 
     if force {
         let resolved = fetch.await.ok()?;
-        state.caches.status_codes.insert(cache_key, resolved).await;
+        state
+            .caches
+            .status_codes
+            .insert(cache_key, resolved.clone())
+            .await;
         Some(resolved)
     } else {
         match state
@@ -436,7 +473,7 @@ async fn get_logs(
     // the same host, so issue them together. Run sequentially, a cold user
     // lookup paid two full round-trips at every instance, and the slowest
     // instance set the latency of the whole fan-out.
-    let (list, status_code) = tokio::join!(
+    let (list, probe) = tokio::join!(
         cached_list(
             &state,
             &host,
@@ -472,25 +509,22 @@ async fn get_logs(
         format!("https://{key}/?channel={channel}&username={user}")
     };
 
-    if status_code == Some(403) {
-        return GetLogsOutcome::OptedOut {
+    match probe {
+        Some(probe) if probe.status == 403 => GetLogsOutcome::OptedOut {
             link: format!("https://{key}"),
-        };
-    }
-
-    if status_code.is_some_and(|status| status / 100 == 2) {
-        GetLogsOutcome::Available {
+        },
+        Some(probe) if probe.status / 100 == 2 => GetLogsOutcome::Available {
             link: format!("https://{key}"),
             channel_full,
             full: full_link,
             list,
-        }
-    } else {
-        GetLogsOutcome::ChannelOnly {
+            months: probe.months,
+        },
+        _ => GetLogsOutcome::ChannelOnly {
             link: format!("https://{key}"),
             channel_full,
             list,
-        }
+        },
     }
 }
 
@@ -563,7 +597,7 @@ pub async fn get_instance(
     let mut channel_links: Vec<String> = Vec::new();
     let mut user_instances: Vec<String> = Vec::new();
     let mut channel_instances: Vec<String> = Vec::new();
-    let mut user_with_len: Vec<RankedInstance> = Vec::new();
+    let mut user_with_len: Vec<(RankedInstance, Arc<Vec<AvailableLogDate>>)> = Vec::new();
     let mut channel_with_len: Vec<RankedInstance> = Vec::new();
 
     if error.is_none() {
@@ -604,9 +638,9 @@ pub async fn get_instance(
                 Some(joined) = probes.next() => {
                     match joined {
                         Ok(GetLogsOutcome::Down) => down_sites += 1,
-                        Ok(GetLogsOutcome::Available { link, channel_full, full, list }) => {
+                        Ok(GetLogsOutcome::Available { link, channel_full, full, list, months }) => {
                             channel_with_len.push((link.clone(), channel_full, list.clone()));
-                            user_with_len.push((link, full, list));
+                            user_with_len.push(((link, full, list), months));
                         }
                         Ok(GetLogsOutcome::ChannelOnly { link, channel_full, list }) => {
                             channel_with_len.push((link, channel_full, list));
@@ -642,13 +676,13 @@ pub async fn get_instance(
         down_sites += abandoned;
 
         channel_with_len.sort_by_key(|a| std::cmp::Reverse(a.2.len()));
-        user_with_len.sort_by_key(|a| std::cmp::Reverse(a.2.len()));
+        user_with_len.sort_by_key(|a| std::cmp::Reverse(a.0.2.len()));
 
         for (link, full, _) in &channel_with_len {
             channel_instances.push(link.clone());
             channel_links.push(full.clone());
         }
-        for (link, full, _) in &user_with_len {
+        for ((link, full, _), _) in &user_with_len {
             user_instances.push(link.clone());
             user_links.push(full.clone());
         }
@@ -739,5 +773,13 @@ pub async fn get_instance(
             utc: util::to_utc_string(last_updated_ms),
         },
         elapsed: Elapsed::since(start),
+        channel_lists: channel_with_len
+            .into_iter()
+            .map(|(_, _, list)| list)
+            .collect(),
+        user_lists: user_with_len
+            .into_iter()
+            .map(|(_, months)| months)
+            .collect(),
     }
 }

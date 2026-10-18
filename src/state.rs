@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::http_client;
 use crate::logs::channels::InstanceChannels;
 use crate::logs::health::InstanceHealth;
+use crate::logs::instance::UserProbe;
 use crate::logs::search::{SearchIndex, SearchIndexBuilder};
 use crate::logs::{AvailableLogDate, Channel};
 use crate::twitch::TwitchUser;
@@ -41,7 +42,7 @@ pub const LIST_CACHE_TTL: Duration = Duration::from_secs(600);
 /// These are the tuning knobs if the cache hit rate turns out to be too low
 /// on a busy deployment; the total ceiling is their sum.
 const LIST_CACHE_BYTES: u64 = 256 * 1024 * 1024;
-const STATUS_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+const STATUS_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 const INFO_CACHE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Per-allocation overhead charged on top of payload bytes by the weighers
@@ -98,7 +99,7 @@ pub struct Caches {
     /// list (one per probed instance, plus the ranked/response copies) are
     /// refcount bumps instead of deep clones of a few thousand `String`s.
     pub list_data: Cache<String, Arc<Vec<AvailableLogDate>>>,
-    pub status_codes: Cache<String, u16>,
+    pub status_codes: Cache<String, UserProbe>,
     /// Unlike the original (which never expires this cache), a TTL is
     /// applied here to avoid unbounded growth over long uptimes.
     pub info_data: Cache<String, TwitchUser>,
@@ -117,9 +118,7 @@ impl Caches {
                 .build(),
             status_codes: Cache::builder()
                 .max_capacity(STATUS_CACHE_BYTES)
-                .weigher(|key: &String, _: &u16| {
-                    clamp_weight(string_weight(key) + size_of::<u16>())
-                })
+                .weigher(|key: &String, probe: &UserProbe| list_weight(key, &probe.months))
                 .time_to_live(LIST_CACHE_TTL)
                 .build(),
             info_data: Cache::builder()

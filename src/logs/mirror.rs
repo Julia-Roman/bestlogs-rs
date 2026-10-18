@@ -1,13 +1,80 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock};
 
 use axum::body::Body;
 use regex::Regex;
+use serde::Serialize;
 
 use crate::http_client;
+use crate::logs::AvailableLogDate;
 use crate::state::AppState;
 use crate::util::{self, CHANNEL_LINK_REGEX, USER_LINK_REGEX};
 
 static ID_STYLE_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"id[/=][0-9]+").unwrap());
+
+/// A log request for a specific day (`/channel/{c}/{y}/{m}/{d}`) or month
+/// (`/channel/{c}/user/{u}/{y}/{m}`), in either the name or id form.
+static DATED_PATH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^/channel(?:id)?/[^/]+(?:/user(?:id)?/[^/]+)?/([0-9]{4})/([0-9]{1,2})(?:/([0-9]{1,2}))?/?$",
+    )
+    .unwrap()
+});
+
+/// Year, month, day — day 0 for a month entry. Instances don't agree on
+/// zero-padding, so dates are compared numerically rather than as strings.
+type DateKey = (u32, u32, u32);
+
+fn date_key(date: &AvailableLogDate) -> Option<DateKey> {
+    let day = match &date.day {
+        Some(day) => day.parse().ok()?,
+        None => 0,
+    };
+    Some((date.year.parse().ok()?, date.month.parse().ok()?, day))
+}
+
+#[derive(Serialize)]
+struct ListBody {
+    #[serde(rename = "availableLogs")]
+    available_logs: Vec<AvailableLogDate>,
+}
+
+/// Every date any of the instances has, newest first like a single
+/// instance's own `/list`.
+fn merge_lists(lists: &[Arc<Vec<AvailableLogDate>>]) -> Vec<AvailableLogDate> {
+    let mut merged: BTreeMap<DateKey, &AvailableLogDate> = BTreeMap::new();
+    for date in lists.iter().flat_map(|list| list.iter()) {
+        if let Some(key) = date_key(date) {
+            merged.entry(key).or_insert(date);
+        }
+    }
+    merged.into_values().rev().cloned().collect()
+}
+
+/// The first instance, in ranked order, whose list has the date the path
+/// asks for. A month entry (user lists only go down to the month) covers
+/// every day in it. `None` when the path isn't dated or nobody has that date.
+fn pick_for_date(
+    path: &str,
+    instances: &[String],
+    lists: &[Arc<Vec<AvailableLogDate>>],
+) -> Option<String> {
+    let caps = DATED_PATH_REGEX.captures(path)?;
+    let year: u32 = caps[1].parse().ok()?;
+    let month: u32 = caps[2].parse().ok()?;
+    let day: Option<u32> = caps.get(3).and_then(|d| d.as_str().parse().ok());
+
+    let has_date = |list: &Arc<Vec<AvailableLogDate>>| {
+        list.iter()
+            .filter_map(date_key)
+            .any(|(y, m, d)| y == year && m == month && (d == 0 || day.is_none_or(|day| d == day)))
+    };
+    instances
+        .iter()
+        .zip(lists)
+        .find(|&(_, list)| has_date(list))
+        .map(|(instance, _)| instance.clone())
+}
 
 /// Port of `extractValue`: pulls a channel/user token out of the raw mirror
 /// URL, prefixing it with `id:` whenever the URL uses id-style references
@@ -51,7 +118,8 @@ pub enum MirrorOutcome {
 
 /// Port of `logsApi`: resolves the best instance for the channel/user
 /// embedded in the URL, rewrites the path to use resolved Twitch ids, and
-/// proxies the request through to that instance.
+/// proxies the request through to that instance. `/list` is the exception:
+/// it is answered locally with the union of every instance's dates.
 pub async fn mirror_request(state: &Arc<AppState>, raw_url: &str) -> MirrorOutcome {
     let channel = extract_value(raw_url, &CHANNEL_LINK_REGEX);
     let user = extract_value(raw_url, &USER_LINK_REGEX);
@@ -71,12 +139,35 @@ pub async fn mirror_request(state: &Arc<AppState>, raw_url: &str) -> MirrorOutco
         };
     }
 
-    let instance_link = data
-        .user_logs
-        .instances
-        .first()
-        .or_else(|| data.channel_logs.instances.first())
-        .cloned();
+    let path = raw_url.split('?').next().unwrap_or(raw_url);
+    let (ranked, lists) = if user.is_some() {
+        (&data.user_logs.instances, &data.user_lists)
+    } else {
+        (&data.channel_logs.instances, &data.channel_lists)
+    };
+
+    let source = ranked.clone();
+
+    if path.eq_ignore_ascii_case("/list") {
+        let body = ListBody {
+            available_logs: merge_lists(lists),
+        };
+        let body = match serde_json::to_vec(&body) {
+            Ok(body) => body,
+            Err(err) => return MirrorOutcome::UpstreamError(err.to_string()),
+        };
+        return MirrorOutcome::Proxied {
+            status: 200,
+            content_type: Some("application/json".to_string()),
+            content_length: Some(body.len() as u64),
+            body: Body::from(body),
+            source,
+        };
+    }
+
+    // A day or month that some instance has should be served from one that
+    // has it, rather than 404 from whichever has the most days overall.
+    let instance_link = pick_for_date(path, ranked, lists).or_else(|| ranked.first().cloned());
     let Some(instance_link) = instance_link else {
         return MirrorOutcome::NotFound {
             status: 404,
@@ -110,12 +201,6 @@ pub async fn mirror_request(state: &Arc<AppState>, raw_url: &str) -> MirrorOutco
             })
             .into_owned();
     }
-
-    let source = if !data.user_logs.instances.is_empty() {
-        data.user_logs.instances.clone()
-    } else {
-        data.channel_logs.instances.clone()
-    };
 
     let response = state
         .http

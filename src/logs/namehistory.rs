@@ -14,6 +14,7 @@ pub struct PreviousName {
     pub first_timestamp: DateTime<Utc>,
 }
 
+#[derive(Default)]
 pub struct NameHistoryResult {
     pub source_instances: Vec<String>,
     pub name_history: Vec<PreviousName>,
@@ -30,12 +31,7 @@ pub async fn get_name_history(
     let user_id = if let Some(login) = stripped.strip_prefix("login:") {
         match crate::twitch::get_info(state, login).await {
             Ok(info) => info.id,
-            Err(_) => {
-                return Ok(NameHistoryResult {
-                    source_instances: Vec::new(),
-                    name_history: Vec::new(),
-                });
-            }
+            Err(_) => return Ok(NameHistoryResult::default()),
         }
     } else if stripped.chars().all(|c| c.is_ascii_digit()) && !stripped.is_empty() {
         stripped.to_string()
@@ -47,16 +43,12 @@ pub async fn get_name_history(
     };
 
     if state.config.hidden_namehistory_ids.contains(&user_id) {
-        return Ok(NameHistoryResult {
-            source_instances: Vec::new(),
-            name_history: Vec::new(),
-        });
+        return Ok(NameHistoryResult::default());
     }
 
-    let instances = state.alive_instances();
     let results: Vec<(String, Option<Vec<PreviousName>>)> =
-        futures::future::join_all(instances.iter().map(|key| {
-            let user_id = user_id.clone();
+        futures::future::join_all(state.alive_instances().into_iter().map(|key| {
+            let user_id = &user_id;
             async move {
                 let host = state.instance_host(key);
                 let response = state
@@ -73,7 +65,7 @@ pub async fn get_name_history(
                     _ => None,
                 };
 
-                (host, entries)
+                (host.to_string(), entries)
             }
         }))
         .await;

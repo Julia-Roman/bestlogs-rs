@@ -126,34 +126,12 @@ impl Config {
         let defaults: serde_json::Value = serde_json::from_str(DEFAULT_CONFIG_JSON)
             .expect("built-in example_config.json must be valid JSON");
 
-        let merged = match std::fs::read_to_string("config.json") {
-            Ok(contents) => match serde_json::from_str::<serde_json::Value>(&contents) {
-                Ok(custom) => {
-                    let mut merged = defaults.clone();
-                    if let (Some(merged_obj), Some(custom_obj)) =
-                        (merged.as_object_mut(), custom.as_object())
-                    {
-                        for (key, value) in custom_obj {
-                            merged_obj.insert(key.clone(), value.clone());
-                        }
-                    }
-                    merged
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "config.json is not valid JSON ({err}); falling back to built-in defaults"
-                    );
-                    defaults.clone()
-                }
-            },
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => defaults.clone(),
-            Err(err) => {
-                tracing::warn!(
-                    "Failed to read config.json ({err}); falling back to built-in defaults"
-                );
-                defaults.clone()
-            }
-        };
+        let mut merged = defaults.clone();
+        if let (Some(fields), Some(serde_json::Value::Object(custom))) =
+            (merged.as_object_mut(), read_config_file())
+        {
+            fields.extend(custom);
+        }
 
         let mut config: Config = match serde_json::from_value(merged) {
             Ok(config) => config,
@@ -185,4 +163,25 @@ impl Config {
 
         config
     }
+}
+
+/// `config.json` from the working directory, or `None` (with a warning, unless
+/// it simply doesn't exist) when it can't be used.
+fn read_config_file() -> Option<serde_json::Value> {
+    let contents = match std::fs::read_to_string("config.json") {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            tracing::warn!("Failed to read config.json ({err}); falling back to built-in defaults");
+            return None;
+        }
+    };
+
+    serde_json::from_str(&contents)
+        .inspect_err(|err| {
+            tracing::warn!(
+                "config.json is not valid JSON ({err}); falling back to built-in defaults"
+            );
+        })
+        .ok()
 }

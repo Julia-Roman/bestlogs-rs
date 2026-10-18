@@ -15,9 +15,6 @@ use crate::logs::{AvailableLogDate, Channel};
 use crate::twitch::TwitchUser;
 use crate::util;
 
-pub const RELOAD_INTERVAL_MS: i64 = 60 * 60 * 1000; // 1 hour
-pub const ERROR_INTERVAL_MS: i64 = 60 * 1000; // 1 minute
-
 /// How long a `/list` (or user-availability) probe result stays cached
 /// between full reloads. Matches how long rustlog itself tells clients to
 /// cache the same response (`Cache-Control: max-age=600`), so we're never
@@ -215,19 +212,14 @@ impl AppState {
 
     /// The hostname actually queried for an instance: its configured
     /// `alternate`, or the instance key itself.
-    pub fn instance_host(&self, key: &str) -> String {
+    pub fn instance_host<'a>(&'a self, key: &'a str) -> &'a str {
         self.config
             .justlogs_instances
             .get(key)
-            .and_then(|meta| meta.alternate.clone())
-            .unwrap_or_else(|| key.to_string())
+            .and_then(|meta| meta.alternate.as_deref())
+            .unwrap_or(key)
     }
 
-    /// Instances not currently flagged as down (i.e. with a non-empty last
-    /// loaded channel list, or not loaded yet).
-    ///
-    /// Borrowed from the config rather than cloned: this runs once per
-    /// lookup and the keys outlive any single request.
     /// Resolves a login or `id:` reference from the instances' own channel
     /// lists, without asking Twitch. The lists carry no ban status.
     pub fn known_channel(&self, channel: &str) -> Option<Channel> {
@@ -244,6 +236,11 @@ impl AppState {
             .find_map(|entry| entry.find_login(channel).cloned())
     }
 
+    /// Instances not currently flagged as down (i.e. with a non-empty last
+    /// loaded channel list, or not loaded yet).
+    ///
+    /// Borrowed from the config rather than cloned: this runs once per
+    /// lookup and the keys outlive any single request.
     pub fn alive_instances(&self) -> Vec<&str> {
         self.config
             .justlogs_instances

@@ -156,12 +156,104 @@ async fn fetch_rustlog_day(
         .await?;
 
     let mut lines: Vec<String> = NEWLINE_REGEX.split(&body).map(str::to_string).collect();
+    lines.pop();
     lines.reverse();
-    if !lines.is_empty() {
-        lines.remove(0);
-    }
 
     Ok(tag_historical(lines, first_ts))
+}
+
+/// Fetches up to `MAX_BACKFILL_DAYS` of `days` (newest first) from one
+/// instance, stopping once `limit` is reached counting the `recent` messages
+/// already in hand, and returns them oldest first. Only a failure on the
+/// newest day fails the instance; a later day that fails is skipped.
+async fn fetch_backfill(
+    state: &AppState,
+    instance_link: &str,
+    channel_id: &str,
+    days: &[AvailableLogDate],
+    limit: usize,
+    recent: usize,
+    first_ts: Option<i64>,
+) -> anyhow::Result<Vec<String>> {
+    let mut fetched: Vec<Vec<String>> = Vec::new();
+    let mut total = recent;
+
+    for (index, date) in days.iter().take(MAX_BACKFILL_DAYS).enumerate() {
+        if total >= limit {
+            break;
+        }
+        match fetch_rustlog_day(state, instance_link, channel_id, date, limit - total, first_ts)
+            .await
+        {
+            Ok(lines) => {
+                total += lines.len();
+                fetched.push(lines);
+            }
+            Err(err) if index == 0 => return Err(err),
+            Err(_) => {}
+        }
+    }
+
+    // Assembled once into a buffer sized for the recent-messages tail too:
+    // prepending each day with `chain(..).collect()` reallocated and
+    // re-copied the whole accumulated list on every one of the (up to 7)
+    // iterations.
+    let mut merged = Vec::with_capacity(total);
+    for day in fetched.into_iter().rev() {
+        merged.extend(day);
+    }
+    Ok(merged)
+}
+
+/// Older history for `channel` from the best-ranked log instance (the first
+/// configured one whenever it has the channel), trying the next-ranked one
+/// when an instance fails, up to `MAX_RETRIES` failures. Returns the link of
+/// the instance it came from along with the lines, oldest first.
+async fn backfill(
+    state: &Arc<AppState>,
+    channel: &str,
+    recent: usize,
+    limit: usize,
+    first_ts: Option<i64>,
+) -> Option<(String, Vec<String>)> {
+    let logs = get_instance(state, channel, None, false, false, None).await;
+    let channel_id = logs.request.channel.as_ref().map_or("", |c| c.id.as_str());
+
+    let mut instances = logs.channel_logs.instances;
+    if let Some(first_key) = state.config.justlogs_instances.keys().next() {
+        let main_instance = format!("https://{first_key}");
+        if let Some(index) = instances.iter().position(|i| *i == main_instance) {
+            instances[..=index].rotate_right(1);
+        }
+    }
+
+    let mut failures = 0usize;
+    for link in instances {
+        if failures == MAX_RETRIES {
+            break;
+        }
+        let host = link.replace("https://", "");
+        let days = &logs.logged_data.list;
+        match fetch_backfill(state, &link, channel_id, days, limit, recent, first_ts).await {
+            Ok(lines) => {
+                info!(
+                    "[{host}] Channel: {channel} | 200 - {} messages",
+                    recent + lines.len()
+                );
+                return Some((link, lines));
+            }
+            Err(err) => {
+                error!("[{host}] Channel: {channel} | Failed loading messages: {err}");
+                failures += 1;
+            }
+        }
+    }
+
+    error!(
+        "[RecentMessages] Channel: {channel} | Failed to fetch logs after {} retries",
+        failures + 1
+    );
+    None
 }
 
 /// Port of `Utils.getRecentMessages`: queries recent-messages instances for
@@ -232,121 +324,24 @@ pub async fn get_recent_messages(
     }
 
     let mut instance = vec![rm_instance];
-    let first_ts: Option<i64> = messages
-        .first()
-        .and_then(|m| TMI_SENT_REGEX.captures(m))
-        .and_then(|c| c[1].parse().ok());
 
     if !rm_only {
-        let logs = get_instance(state, channel, None, false, false, None).await;
-        let channel_id = logs
-            .request
-            .channel
-            .as_ref()
-            .map(|c| c.id.clone())
-            .unwrap_or_default();
+        let first_ts: Option<i64> = messages
+            .first()
+            .and_then(|m| TMI_SENT_REGEX.captures(m))
+            .and_then(|c| c[1].parse().ok());
 
-        let mut instances = logs.channel_logs.instances.clone();
-        if let Some(first_key) = state.config.justlogs_instances.keys().next() {
-            let main_instance = format!("https://{first_key}");
-            if let Some(index) = instances.iter().position(|i| i == &main_instance)
-                && index > 0
-            {
-                let picked = instances.remove(index);
-                instances.insert(0, picked);
-            }
-        }
-
-        let mut success = false;
-        let mut retries = 0usize;
-        let mut instance_index = 0usize;
-        #[allow(unused_assignments)]
-        let mut instance_link = "Logs".to_string();
-
-        while retries < MAX_RETRIES && instance_index < instances.len() && !success {
-            instance_link = instances[instance_index].clone();
-
-            let attempt: anyhow::Result<()> = async {
-                if !logs.available.channel {
-                    return Ok(());
-                }
-
-                let list = &logs.logged_data.list;
-                let mut days: Vec<Vec<String>> = Vec::new();
-                let mut total = messages.len();
-                let mut days_fetched = 0usize;
-
-                while total < limit && days_fetched < MAX_BACKFILL_DAYS && days_fetched < list.len()
-                {
-                    match fetch_rustlog_day(
-                        state,
-                        &instance_link,
-                        &channel_id,
-                        &list[days_fetched],
-                        limit - total,
-                        first_ts,
-                    )
-                    .await
-                    {
-                        Ok(day_logs) => {
-                            total += day_logs.len();
-                            days.push(day_logs);
-                        }
-                        Err(err) => {
-                            if days_fetched == 0 {
-                                return Err(err);
-                            }
-                        }
-                    }
-                    days_fetched += 1;
-                }
-
-                info!(
-                    "[{}] Channel: {channel} | 200 - {total} messages",
-                    instance_link.replace("https://", "")
-                );
-
-                // Days are fetched newest first and the response wants oldest
-                // first, with the live recent-messages tail last. Assembled
-                // once into a right-sized buffer: prepending each day with
-                // `chain(..).collect()` reallocated and re-copied the whole
-                // accumulated list on every one of the (up to 7) iterations.
-                let mut merged = Vec::with_capacity(total);
-                for day in days.into_iter().rev() {
-                    merged.extend(day);
-                }
-                // Takes ownership of the recent-messages tail instead of
-                // cloning it. The old guard here compared the merged length
-                // against `messages.len()`, which it is by construction never
-                // smaller than.
-                merged.append(&mut messages);
-
-                instance.push(instance_link.clone());
-                messages = merged;
-                error_code = None;
-                error = None;
-                status = 200;
-                success = true;
-
-                Ok(())
-            }
-            .await;
-
-            if let Err(err) = attempt {
-                error!(
-                    "[{}] Channel: {channel} | Failed loading messages: {err}",
-                    instance_link.replace("https://", "")
-                );
-                retries += 1;
-            }
-            instance_index += 1;
-        }
-
-        if !success {
-            error!(
-                "[RecentMessages] Channel: {channel} | Failed to fetch logs after {} retries",
-                retries + 1
-            );
+        if let Some((link, mut merged)) =
+            backfill(state, channel, messages.len(), limit, first_ts).await
+        {
+            // Takes ownership of the recent-messages tail instead of
+            // cloning it; `merged` was sized for it.
+            merged.append(&mut messages);
+            messages = merged;
+            instance.push(link);
+            error_code = None;
+            error = None;
+            status = 200;
         }
     }
 

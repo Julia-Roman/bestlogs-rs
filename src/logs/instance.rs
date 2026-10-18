@@ -133,9 +133,69 @@ pub struct InstanceResult {
     pub user_lists: Vec<Arc<Vec<AvailableLogDate>>>,
 }
 
-/// One instance's ranking entry: its display link, the user-facing full
-/// link, and the shared date list its rank is derived from.
-type RankedInstance = (String, String, Arc<Vec<AvailableLogDate>>);
+impl InstanceResult {
+    /// The ranking a lookup answers with: the user's when one was asked for,
+    /// the channel's otherwise.
+    pub fn links(&self, for_user: bool) -> &LinksBlock {
+        if for_user {
+            &self.user_logs
+        } else {
+            &self.channel_logs
+        }
+    }
+}
+
+/// What every per-instance probe of one lookup shares, handed to each
+/// spawned probe behind one `Arc` rather than cloned field by field.
+struct Lookup {
+    /// As shown in links: the login, or `id:{id}` for a banned channel.
+    channel: String,
+    channel_id: String,
+    /// The requested user's link name and id; probed by id like the channel.
+    user: Option<(String, String)>,
+    force: bool,
+    pretty: bool,
+    banned: bool,
+}
+
+impl Lookup {
+    fn channel_link(&self, key: &str) -> String {
+        let channel = &self.channel;
+        if self.pretty {
+            format!("https://lurkology.com/logs?c={channel}")
+        } else {
+            format!("https://{key}/?channel={channel}")
+        }
+    }
+
+    fn user_link(&self, key: &str, user: &str) -> String {
+        let channel = &self.channel;
+        if self.pretty {
+            format!("https://lurkology.com/logs?c={channel}&u={user}")
+        } else {
+            format!("https://{key}/?channel={channel}&username={user}")
+        }
+    }
+}
+
+/// One instance's ranking entry.
+struct Ranked {
+    link: String,
+    full_link: String,
+    /// The channel's day list on this instance, which is what it ranks by.
+    days: Arc<Vec<AvailableLogDate>>,
+}
+
+fn links_block<'a>(ranked: impl Iterator<Item = &'a Ranked>) -> LinksBlock {
+    let (instances, full_link): (Vec<_>, Vec<_>) = ranked
+        .map(|entry| (entry.link.clone(), entry.full_link.clone()))
+        .unzip();
+    LinksBlock {
+        count: instances.len(),
+        instances,
+        full_link,
+    }
+}
 
 /// A user-availability probe's answer: the status, plus the months the user
 /// has logs for when it was a 2xx.
@@ -160,39 +220,31 @@ enum GetLogsOutcome {
     OptedOut { link: String },
     /// The channel is logged; no user was requested (or its status wasn't
     /// checked).
-    ChannelOnly {
-        link: String,
-        channel_full: String,
-        list: Arc<Vec<AvailableLogDate>>,
-    },
+    ChannelOnly(Ranked),
     /// The channel (and, if requested, the user) are logged here.
     Available {
-        link: String,
-        channel_full: String,
-        full: String,
-        list: Arc<Vec<AvailableLogDate>>,
+        channel: Ranked,
+        user: Ranked,
         months: Arc<Vec<AvailableLogDate>>,
     },
 }
 
-/// A `/list` probe for the channel's day count.
+/// Sends one `/list` probe, reporting it to the health tracker if it fails.
 ///
-/// Reports the outcome to the health tracker, but only a transport failure
-/// (timeout, refused connection, TLS error) or a 5xx counts against the
-/// instance. A 403/404 is an answer — for an opted-out or unlogged channel a
-/// routine one — and must never trip the breaker.
-async fn fetch_list(
+/// Only a transport failure (timeout, refused connection, TLS error) or a
+/// 5xx counts against the instance. A 403/404 is an answer — for an
+/// opted-out or unlogged channel a routine one — and must never trip the
+/// breaker.
+async fn send_list_probe(
     state: &AppState,
     host: &str,
-    channel_path: &str,
-    channel_clean: &str,
+    query: &[(&str, &str)],
     timeout: Duration,
-) -> anyhow::Result<Arc<Vec<AvailableLogDate>>> {
-    let started = Instant::now();
+) -> anyhow::Result<reqwest::Response> {
     let response = match state
         .http
         .get(format!("https://{host}/list"))
-        .query(&[(channel_path, channel_clean)])
+        .query(query)
         .timeout(timeout)
         .send()
         .await
@@ -209,7 +261,18 @@ async fn fetch_list(
         state.health.record_failure(host, status.as_str());
         anyhow::bail!("{host} responded with {status}");
     }
+    Ok(response)
+}
 
+/// A `/list` probe for the channel's day count.
+async fn fetch_list(
+    state: &AppState,
+    host: &str,
+    channel_id: &str,
+    timeout: Duration,
+) -> anyhow::Result<Arc<Vec<AvailableLogDate>>> {
+    let started = Instant::now();
+    let response = send_list_probe(state, host, &[("channelid", channel_id)], timeout).await?;
     let body: ListResponse = response.error_for_status()?.json().await?;
     state.health.record_success(host, started.elapsed());
     Ok(Arc::new(body.available_logs))
@@ -218,33 +281,14 @@ async fn fetch_list(
 async fn fetch_user_status(
     state: &AppState,
     host: &str,
-    channel_path: &str,
-    channel_clean: &str,
-    user_path: &str,
-    user_clean: &str,
+    channel_id: &str,
+    user_id: &str,
     timeout: Duration,
 ) -> anyhow::Result<UserProbe> {
     let started = Instant::now();
-    let response = match state
-        .http
-        .get(format!("https://{host}/list"))
-        .query(&[(channel_path, channel_clean), (user_path, user_clean)])
-        .timeout(timeout)
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(err) => {
-            state.health.record_failure(host, &err.to_string());
-            return Err(err.into());
-        }
-    };
-
+    let query = [("channelid", channel_id), ("userid", user_id)];
+    let response = send_list_probe(state, host, &query, timeout).await?;
     let status = response.status();
-    if status.is_server_error() {
-        state.health.record_failure(host, status.as_str());
-        anyhow::bail!("{host} responded with {status}");
-    }
 
     // The body is the same `availableLogs` shape as a channel probe, only
     // by month. A 2xx with a body that doesn't parse still means the user is
@@ -271,15 +315,11 @@ async fn fetch_user_status(
 ///
 /// `None` means the instance cannot contribute to this request at all: its
 /// breaker is open and nothing is cached for the channel.
-#[allow(clippy::too_many_arguments)]
 async fn cached_list(
     state: &AppState,
     host: &str,
-    channel: &str,
-    channel_path: &str,
-    channel_clean: &str,
+    lookup: &Lookup,
     cache_key: String,
-    force: bool,
     permit: Permit,
 ) -> Option<Arc<Vec<AvailableLogDate>>> {
     let timeout = match permit {
@@ -290,9 +330,10 @@ async fn cached_list(
         Permit::CachedOnly => return state.caches.list_data.get(&cache_key).await,
     };
 
-    let fetch = fetch_list(state, host, channel_path, channel_clean, timeout);
+    let fetch = fetch_list(state, host, &lookup.channel_id, timeout);
+    let channel = &lookup.channel;
 
-    if force {
+    if lookup.force {
         let fetched = match fetch.await {
             Ok(list) => list,
             Err(err) => {
@@ -320,18 +361,12 @@ async fn cached_list(
 /// The same, for the user-availability probe. `None` is "not known" — either
 /// the breaker is open with nothing cached, or the probe failed — and leaves
 /// the instance contributing channel logs only.
-#[allow(clippy::too_many_arguments)]
 async fn cached_status(
     state: &AppState,
     host: &str,
-    channel: &str,
-    channel_path: &str,
-    channel_clean: &str,
-    user: &str,
-    user_path: &str,
-    user_clean: &str,
+    lookup: &Lookup,
+    (user, user_id): (&str, &str),
     cache_key: String,
-    force: bool,
     permit: Permit,
 ) -> Option<UserProbe> {
     let timeout = match permit {
@@ -339,17 +374,9 @@ async fn cached_status(
         Permit::CachedOnly => return state.caches.status_codes.get(&cache_key).await,
     };
 
-    let fetch = fetch_user_status(
-        state,
-        host,
-        channel_path,
-        channel_clean,
-        user_path,
-        user_clean,
-        timeout,
-    );
+    let fetch = fetch_user_status(state, host, &lookup.channel_id, user_id, timeout);
 
-    if force {
+    if lookup.force {
         let resolved = fetch.await.ok()?;
         state
             .caches
@@ -366,6 +393,7 @@ async fn cached_status(
         {
             Ok(status) => Some(status),
             Err(err) => {
+                let channel = &lookup.channel;
                 error!("[{host}] Failed checking {channel}/{user} status: {err}");
                 None
             }
@@ -386,20 +414,7 @@ async fn cached_status(
 /// Takes owned arguments because `get_instance` spawns this per instance:
 /// a probe that outlives the request's deadline is left running to populate
 /// the cache rather than cancelled.
-#[allow(clippy::too_many_arguments)]
-async fn get_logs(
-    state: Arc<AppState>,
-    key: String,
-    user: Option<(String, String)>,
-    channel: String,
-    channel_id: String,
-    force: bool,
-    pretty: bool,
-    banned: bool,
-) -> GetLogsOutcome {
-    let channel_path = "channelid";
-    let channel_clean = channel_id.as_str();
-
+async fn get_logs(state: Arc<AppState>, key: String, lookup: Arc<Lookup>) -> GetLogsOutcome {
     // A binary search against the live map entry rather than a scan of it
     // (let alone a cloned-out `Vec`). Every alive instance is probed on
     // every lookup and the lists total ~1.6M channels, so a linear
@@ -408,13 +423,13 @@ async fn get_logs(
     // `.await` below, so it can't hold a shard lock against `reload`'s
     // writes. See `logs/channels.rs` for how the entry is ordered.
     let (channel_known, instance_down) = match state.caches.instance_channels.get(&key) {
-        Some(entry) => (entry.contains(channel_clean), entry.is_empty()),
+        Some(entry) => (entry.contains(&lookup.channel_id), entry.is_empty()),
         // Not loaded yet: matches the previous `unwrap_or_default()` empty
         // list — nothing known, and reported down for a banned-channel lookup.
         None => (false, true),
     };
 
-    if !banned && !channel_known {
+    if !lookup.banned && !channel_known {
         return GetLogsOutcome::ChannelNotFound;
     }
     if instance_down {
@@ -422,106 +437,70 @@ async fn get_logs(
     }
 
     // Only resolved once this instance is actually going to be queried —
-    // it allocates, and the two early returns above are the common case.
+    // they allocate, and the two early returns above are the common case.
     let host = state.instance_host(&key);
-    let permit = state.health.permit(&host);
-    let list_cache_key = format!("logs:list:{key}:id-{channel_id}");
+    let permit = state.health.permit(host);
+    let list_cache_key = format!("logs:list:{key}:id-{}", lookup.channel_id);
+    let link = format!("https://{key}");
+    let full_link = lookup.channel_link(&key);
 
-    let channel_full = if pretty {
-        format!("https://lurkology.com/logs?c={channel}")
-    } else {
-        format!("https://{key}/?channel={channel}")
-    };
-
-    let Some((user, user_id)) = user else {
-        let list = cached_list(
-            &state,
-            &host,
-            &channel,
-            channel_path,
-            channel_clean,
-            list_cache_key,
-            force,
-            permit,
-        )
-        .await;
-        return match list {
-            Some(list) => GetLogsOutcome::ChannelOnly {
-                link: format!("https://{key}"),
-                channel_full,
-                list,
-            },
+    let Some((user, user_id)) = &lookup.user else {
+        return match cached_list(&state, host, &lookup, list_cache_key, permit).await {
+            Some(days) => GetLogsOutcome::ChannelOnly(Ranked {
+                link,
+                full_link,
+                days,
+            }),
             None => GetLogsOutcome::Down,
         };
     };
 
-    let instance_cache_key = format!("logs:instance:{key}:id-{channel_id}:id-{user_id}");
-    let user_path = "userid";
-    let user_clean = user_id.as_str();
+    let status_cache_key = format!("logs:instance:{key}:id-{}:id-{user_id}", lookup.channel_id);
 
     // The day list and the user-availability probe are independent GETs to
     // the same host, so issue them together. Run sequentially, a cold user
     // lookup paid two full round-trips at every instance, and the slowest
     // instance set the latency of the whole fan-out.
-    let (list, probe) = tokio::join!(
-        cached_list(
-            &state,
-            &host,
-            &channel,
-            channel_path,
-            channel_clean,
-            list_cache_key,
-            force,
-            permit,
-        ),
+    let (days, probe) = tokio::join!(
+        cached_list(&state, host, &lookup, list_cache_key, permit),
         cached_status(
             &state,
-            &host,
-            &channel,
-            channel_path,
-            channel_clean,
-            &user,
-            user_path,
-            user_clean,
-            instance_cache_key,
-            force,
+            host,
+            &lookup,
+            (user, user_id),
+            status_cache_key,
             permit,
         )
     );
 
-    let Some(list) = list else {
+    let Some(days) = days else {
         return GetLogsOutcome::Down;
     };
-
-    let full_link = if pretty {
-        format!("https://lurkology.com/logs?c={channel}&u={user}")
-    } else {
-        format!("https://{key}/?channel={channel}&username={user}")
+    let channel = Ranked {
+        link,
+        full_link,
+        days,
     };
 
     match probe {
-        Some(probe) if probe.status == 403 => GetLogsOutcome::OptedOut {
-            link: format!("https://{key}"),
-        },
+        Some(probe) if probe.status == 403 => GetLogsOutcome::OptedOut { link: channel.link },
         Some(probe) if probe.status / 100 == 2 => GetLogsOutcome::Available {
-            link: format!("https://{key}"),
-            channel_full,
-            full: full_link,
-            list,
+            user: Ranked {
+                link: channel.link.clone(),
+                full_link: lookup.user_link(&key, user),
+                days: channel.days.clone(),
+            },
+            channel,
             months: probe.months,
         },
-        _ => GetLogsOutcome::ChannelOnly {
-            link: format!("https://{key}"),
-            channel_full,
-            list,
-        },
+        _ => GetLogsOutcome::ChannelOnly(channel),
     }
 }
 
 /// Port of `Utils.getInstance`: resolves the channel (and optional user) from
 /// the instances' channel lists or Twitch GQL, ranks every alive instance by
-/// log-day count, and assembles
-/// the same aggregate response shape as the original.
+/// log-day count, and assembles the same aggregate response shape as the
+/// original.
 pub async fn get_instance(
     state: &Arc<AppState>,
     channel: &str,
@@ -601,42 +580,32 @@ pub async fn get_instance(
     }
 
     let mut opt_outs: Vec<String> = Vec::new();
-    let mut user_links: Vec<String> = Vec::new();
-    let mut channel_links: Vec<String> = Vec::new();
-    let mut user_instances: Vec<String> = Vec::new();
-    let mut channel_instances: Vec<String> = Vec::new();
-    let mut user_with_len: Vec<(RankedInstance, Arc<Vec<AvailableLogDate>>)> = Vec::new();
-    let mut channel_with_len: Vec<RankedInstance> = Vec::new();
+    let mut channel_ranked: Vec<Ranked> = Vec::new();
+    let mut user_ranked: Vec<(Ranked, Arc<Vec<AvailableLogDate>>)> = Vec::new();
 
     if error.is_none() {
-        let channel_id = channel_info
-            .as_ref()
-            .map(|info| info.id.clone())
-            .unwrap_or_default();
-        // Named for the links, probed by id like the channel.
-        let probe_user = resolved_user
-            .clone()
-            .zip(request.user.as_ref().map(|info| info.id.clone()));
-        let alive = state.alive_instances();
+        let lookup = Arc::new(Lookup {
+            channel: channel.clone(),
+            channel_id: channel_info
+                .as_ref()
+                .map(|info| info.id.clone())
+                .unwrap_or_default(),
+            user: resolved_user
+                .clone()
+                .zip(request.user.as_ref().map(|info| info.id.clone())),
+            force,
+            pretty,
+            banned,
+        });
         // Each instance is probed on its own task rather than as one big
         // `join_all`, so a probe that is still running when the deadline
         // below expires is *left running* instead of cancelled: it finishes
         // into the shared cache, and the next request for that channel gets
         // it for free.
-        let mut probes: FuturesUnordered<_> = alive
-            .iter()
-            .map(|key| {
-                tokio::spawn(get_logs(
-                    state.clone(),
-                    key.to_string(),
-                    probe_user.clone(),
-                    channel.clone(),
-                    channel_id.clone(),
-                    force,
-                    pretty,
-                    banned,
-                ))
-            })
+        let mut probes: FuturesUnordered<_> = state
+            .alive_instances()
+            .into_iter()
+            .map(|key| tokio::spawn(get_logs(state.clone(), key.to_string(), lookup.clone())))
             .collect();
 
         // Until the request has an answer worth returning, the wait is bounded
@@ -655,13 +624,11 @@ pub async fn get_instance(
                 Some(joined) = probes.next() => {
                     match joined {
                         Ok(GetLogsOutcome::Down) => down_sites += 1,
-                        Ok(GetLogsOutcome::Available { link, channel_full, full, list, months }) => {
-                            channel_with_len.push((link.clone(), channel_full, list.clone()));
-                            user_with_len.push(((link, full, list), months));
+                        Ok(GetLogsOutcome::Available { channel, user, months }) => {
+                            channel_ranked.push(channel);
+                            user_ranked.push((user, months));
                         }
-                        Ok(GetLogsOutcome::ChannelOnly { link, channel_full, list }) => {
-                            channel_with_len.push((link, channel_full, list));
-                        }
+                        Ok(GetLogsOutcome::ChannelOnly(channel)) => channel_ranked.push(channel),
                         Ok(GetLogsOutcome::ChannelNotFound) => {}
                         Ok(GetLogsOutcome::OptedOut { link }) => opt_outs.push(link),
                         Err(err) => {
@@ -677,8 +644,8 @@ pub async fn get_instance(
             // answer to the question that was actually asked: for a user
             // lookup, channel logs alone would still report "no user logs
             // found" while a slow instance was about to say otherwise.
-            let answered = !channel_with_len.is_empty()
-                && (resolved_user.is_none() || !user_with_len.is_empty());
+            let answered = !channel_ranked.is_empty()
+                && (resolved_user.is_none() || !user_ranked.is_empty());
             if answered && !grace_armed {
                 grace_armed = true;
                 deadline
@@ -692,25 +659,16 @@ pub async fn get_instance(
         abandoned = probes.len();
         down_sites += abandoned;
 
-        channel_with_len.sort_by_key(|a| std::cmp::Reverse(a.2.len()));
-        user_with_len.sort_by_key(|a| std::cmp::Reverse(a.0.2.len()));
+        channel_ranked.sort_by_key(|entry| std::cmp::Reverse(entry.days.len()));
+        user_ranked.sort_by_key(|(entry, _)| std::cmp::Reverse(entry.days.len()));
 
-        for (link, full, _) in &channel_with_len {
-            channel_instances.push(link.clone());
-            channel_links.push(full.clone());
-        }
-        for ((link, full, _), _) in &user_with_len {
-            user_instances.push(link.clone());
-            user_links.push(full.clone());
-        }
-
-        if !opt_outs.is_empty() && channel_instances.is_empty() {
+        if !opt_outs.is_empty() && channel_ranked.is_empty() {
             error = Some("User or channel has opted out".to_string());
             status = 403;
-        } else if channel_instances.is_empty() {
+        } else if channel_ranked.is_empty() {
             error = Some("No channel logs found".to_string());
             status = 404;
-        } else if user_instances.is_empty() && resolved_user.is_some() {
+        } else if user_ranked.is_empty() && resolved_user.is_some() {
             error = Some("No user logs found".to_string());
             status = 404;
         }
@@ -718,14 +676,14 @@ pub async fn get_instance(
         status = 404;
     }
 
-    let channel_list = channel_with_len
+    let channel_list = channel_ranked
         .first()
-        .map(|(_, _, list)| list.clone())
+        .map(|entry| entry.days.clone())
         .unwrap_or_default();
 
     if let Some(info) = &channel_info
         && info.banned
-        && !channel_instances.is_empty()
+        && !channel_ranked.is_empty()
     {
         state.caches.unique_channels.insert(
             info.id.clone(),
@@ -753,6 +711,8 @@ pub async fn get_instance(
     let last_updated_ms = state.last_updated_ms();
     let since = channel_list.last().cloned();
     let days = channel_list.len();
+    let channel_logs = links_block(channel_ranked.iter());
+    let user_logs = links_block(user_ranked.iter().map(|(entry, _)| entry));
 
     InstanceResult {
         error,
@@ -763,24 +723,16 @@ pub async fn get_instance(
         },
         request,
         available: Available {
-            user: !user_instances.is_empty(),
-            channel: !channel_instances.is_empty(),
+            user: user_logs.count > 0,
+            channel: channel_logs.count > 0,
         },
         logged_data: LoggedData {
             list: channel_list,
             days,
             since,
         },
-        user_logs: LinksBlock {
-            count: user_instances.len(),
-            instances: user_instances,
-            full_link: user_links,
-        },
-        channel_logs: LinksBlock {
-            count: channel_instances.len(),
-            instances: channel_instances,
-            full_link: channel_links,
-        },
+        user_logs,
+        channel_logs,
         opted_out: OptedOut {
             count: opt_outs.len(),
             instances: opt_outs,
@@ -790,13 +742,7 @@ pub async fn get_instance(
             utc: util::to_utc_string(last_updated_ms),
         },
         elapsed: Elapsed::since(start),
-        channel_lists: channel_with_len
-            .into_iter()
-            .map(|(_, _, list)| list)
-            .collect(),
-        user_lists: user_with_len
-            .into_iter()
-            .map(|(_, months)| months)
-            .collect(),
+        channel_lists: channel_ranked.into_iter().map(|entry| entry.days).collect(),
+        user_lists: user_ranked.into_iter().map(|(_, months)| months).collect(),
     }
 }

@@ -7,7 +7,10 @@ use tracing::{error, info};
 use crate::http_client;
 use crate::logs::Channel;
 use crate::logs::channels::InstanceChannels;
-use crate::state::{AppState, ERROR_INTERVAL_MS, RELOAD_INTERVAL_MS};
+use crate::state::AppState;
+
+pub const RELOAD_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const DOWN_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Deserialize)]
 struct ChannelsResponse {
@@ -141,27 +144,17 @@ pub async fn load_instance_channels(state: &Arc<AppState>, only_error: bool) {
 /// starts accepting connections immediately while channels load in the
 /// background, same as the original.
 pub fn spawn_loops(state: Arc<AppState>) {
-    tokio::spawn({
-        let state = state.clone();
-        async move {
-            load_instance_channels(&state, false).await;
-            let mut interval =
-                tokio::time::interval(Duration::from_millis(RELOAD_INTERVAL_MS as u64));
-            interval.tick().await; // first tick fires immediately; skip it, we just loaded
-            loop {
-                interval.tick().await;
-                load_instance_channels(&state, false).await;
-            }
-        }
-    });
+    spawn_loop(state.clone(), false, RELOAD_INTERVAL);
+    spawn_loop(state, true, DOWN_RECHECK_INTERVAL);
+}
 
+fn spawn_loop(state: Arc<AppState>, only_error: bool, period: Duration) {
     tokio::spawn(async move {
-        load_instance_channels(&state, true).await;
-        let mut interval = tokio::time::interval(Duration::from_millis(ERROR_INTERVAL_MS as u64));
-        interval.tick().await;
+        load_instance_channels(&state, only_error).await;
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             interval.tick().await;
-            load_instance_channels(&state, true).await;
+            load_instance_channels(&state, only_error).await;
         }
     });
 }

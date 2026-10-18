@@ -1,7 +1,7 @@
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderName, header};
 use serde_json::json;
 use tokio::sync::Semaphore;
 use tracing::{error, warn};
@@ -41,27 +41,17 @@ pub fn spawn_stats(
         return;
     }
 
-    let hostname = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    let language = headers
-        .get(axum::http::header::ACCEPT_LANGUAGE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let referrer = headers
-        .get(axum::http::header::REFERER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .unwrap_or_default();
-    let url = url.to_string();
-    let name = name.to_string();
-
     let Ok(permit) = STATS_SLOTS.clone().try_acquire_owned() else {
         warn!("[Umami] Dropping '{name}' event: {MAX_INFLIGHT_STATS} posts already in flight");
         return;
     };
+
+    let value = |name: HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
+    let hostname = value(header::HOST).unwrap_or_default().to_string();
+    let language = value(header::ACCEPT_LANGUAGE).map(str::to_string);
+    let referrer = value(header::REFERER).unwrap_or_default().to_string();
+    let url = url.to_string();
+    let name = name.to_string();
 
     tokio::spawn(async move {
         let _permit = permit;

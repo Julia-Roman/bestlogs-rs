@@ -7,7 +7,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::logs::search;
-use crate::state::{AppState, RELOAD_INTERVAL_MS};
+use crate::reload::RELOAD_INTERVAL;
+use crate::state::AppState;
 use crate::twitch::get_info;
 
 pub async fn meta(State(state): State<Arc<AppState>>) -> Response {
@@ -54,17 +55,10 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Response {
                 .caches
                 .instance_channels
                 .get(key)
-                .map(|v| v.len())
-                .unwrap_or(0);
-            let up = state
-                .caches
-                .instance_channels
-                .get(key)
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
+                .map_or(0, |entry| entry.len());
             (
                 key.clone(),
-                json!({ "maintainer": meta.maintainer, "channels": channels, "up": up }),
+                json!({ "maintainer": meta.maintainer, "channels": channels, "up": channels > 0 }),
             )
         })
         .collect();
@@ -72,7 +66,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Response {
     Json(json!({
         "instances": instances,
         "lastUpdate": state.last_updated_ms(),
-        "nextUpdate": RELOAD_INTERVAL_MS,
+        "nextUpdate": RELOAD_INTERVAL.as_millis() as u64,
         "uptime": state.started_at_ms,
     }))
     .into_response()

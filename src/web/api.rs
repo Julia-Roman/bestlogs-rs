@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderName, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use dashmap::DashMap;
 use serde::ser::{SerializeMap, SerializeSeq};
@@ -35,7 +35,7 @@ fn text_status(status: StatusCode, body: impl Into<String>) -> Response {
     let mut response = (status, body.into()).into_response();
     response
         .headers_mut()
-        .insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
     response
 }
 
@@ -192,11 +192,19 @@ pub struct ApiQuery {
     plain: Option<String>,
 }
 
-fn pretty_bool(pretty: &Option<String>) -> bool {
-    pretty
+fn flag(value: &Option<String>) -> bool {
+    value
         .as_deref()
-        .map(|s| s.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .is_some_and(|s| s.eq_ignore_ascii_case("true"))
+}
+
+/// The Umami event data for a channel (and optional user) lookup.
+fn lookup_stats(channel: &str, user: Option<&str>) -> serde_json::Value {
+    let mut data = json!({ "channel": channel });
+    if let Some(user) = user {
+        data["user"] = json!(user);
+    }
+    data
 }
 
 async fn api_lookup(
@@ -210,16 +218,12 @@ async fn api_lookup(
     let channel = util::format_username(&channel_raw);
     let user = user_raw.as_deref().map(util::format_username);
 
-    let mut stat_data = json!({ "channel": channel.clone() });
-    if let Some(user) = &user {
-        stat_data["user"] = json!(user);
-    }
     spawn_stats(
         state.clone(),
         &headers,
         &request_url(&uri),
         "api",
-        stat_data,
+        lookup_stats(&channel, user.as_deref()),
     );
 
     let mut error = None;
@@ -232,31 +236,20 @@ async fn api_lookup(
         error = Some(format!("Invalid username or user ID: {user}"));
     }
 
-    let is_plain = query
-        .plain
-        .as_deref()
-        .map(|s| s.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let pretty = pretty_bool(&query.pretty);
-
+    let pretty = flag(&query.pretty);
     let result = get_instance(&state, &channel, user.as_deref(), false, pretty, error).await;
 
-    if is_plain {
+    if flag(&query.plain) {
         let code = StatusCode::from_u16(result.status).unwrap_or(StatusCode::BAD_REQUEST);
-        let source = if user.is_some() {
-            result.user_logs.instances.clone()
-        } else {
-            result.channel_logs.instances.clone()
-        };
-        let body = if user.is_some() {
-            result.user_logs.full_link.first().cloned()
-        } else {
-            result.channel_logs.full_link.first().cloned()
-        }
-        .or_else(|| result.error.clone())
-        .unwrap_or_default();
+        let links = result.links(user.is_some());
+        let body = links
+            .full_link
+            .first()
+            .or(result.error.as_ref())
+            .cloned()
+            .unwrap_or_default();
 
-        with_source(text_status(code, body), &source)
+        with_source(text_status(code, body), &links.instances)
     } else {
         json_status(result.status, result)
     }
@@ -314,32 +307,22 @@ async fn rdr_lookup(
         return error_redirect(400, &format!("Invalid username or user ID: {user}"));
     }
 
-    let pretty = pretty_bool(&query.pretty);
+    let pretty = flag(&query.pretty);
     let result = get_instance(&state, &channel, user.as_deref(), false, pretty, None).await;
 
-    if let Some(error) = result.error {
-        return error_redirect(result.status, &error);
+    if let Some(error) = &result.error {
+        return error_redirect(result.status, error);
     }
 
-    let mut stat_data = json!({ "channel": channel.clone() });
-    if let Some(user) = &user {
-        stat_data["user"] = json!(user);
-    }
     spawn_stats(
         state.clone(),
         &headers,
         &format!("/rdr/{channel_raw}"),
         "rdr",
-        stat_data,
+        lookup_stats(&channel, user.as_deref()),
     );
 
-    let target = if user.is_some() {
-        result.user_logs.full_link.first().cloned()
-    } else {
-        result.channel_logs.full_link.first().cloned()
-    };
-
-    match target {
+    match result.links(user.is_some()).full_link.first().cloned() {
         Some(target) => (StatusCode::FOUND, [(header::LOCATION, target)]).into_response(),
         None => error_redirect(404, "No channel logs found"),
     }
@@ -421,20 +404,19 @@ pub async fn mirror(State(state): State<Arc<AppState>>, headers: HeaderMap, uri:
     let channel = extract_value(&raw_url, &CHANNEL_LINK_REGEX);
     let user = extract_value(&raw_url, &USER_LINK_REGEX);
 
-    let mut stat_data = json!({ "channel": channel.clone().unwrap_or_default() });
-    if let Some(user) = &user {
-        stat_data["user"] = json!(user);
-    }
-    spawn_stats(state.clone(), &headers, &raw_url, "mirror", stat_data);
+    spawn_stats(
+        state.clone(),
+        &headers,
+        &raw_url,
+        "mirror",
+        lookup_stats(channel.as_deref().unwrap_or_default(), user.as_deref()),
+    );
 
-    if channel.is_none() {
+    let Some(channel) = channel else {
         return text_status(StatusCode::NOT_FOUND, "Invalid channel or channel ID");
-    }
+    };
 
-    match mirror_request(&state, &raw_url).await {
-        MirrorOutcome::InvalidChannel => {
-            text_status(StatusCode::NOT_FOUND, "Invalid channel or channel ID")
-        }
+    match mirror_request(&state, &raw_url, &channel, user.as_deref()).await {
         MirrorOutcome::NotFound { status, message } => text_status(
             StatusCode::from_u16(status).unwrap_or(StatusCode::NOT_FOUND),
             message,

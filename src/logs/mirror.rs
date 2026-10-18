@@ -91,8 +91,6 @@ pub fn extract_value(raw_url: &str, regex: &Regex) -> Option<String> {
 }
 
 pub enum MirrorOutcome {
-    /// No channel could be extracted from the URL at all.
-    InvalidChannel,
     /// `get_instance` returned an error (channel/user not found, opted out, ...).
     NotFound {
         status: u16,
@@ -120,17 +118,15 @@ pub enum MirrorOutcome {
 /// embedded in the URL, rewrites the path to use resolved Twitch ids, and
 /// proxies the request through to that instance. `/list` is the exception:
 /// it is answered locally with the union of every instance's dates.
-pub async fn mirror_request(state: &Arc<AppState>, raw_url: &str) -> MirrorOutcome {
-    let channel = extract_value(raw_url, &CHANNEL_LINK_REGEX);
-    let user = extract_value(raw_url, &USER_LINK_REGEX);
-
-    let Some(channel) = channel else {
-        return MirrorOutcome::InvalidChannel;
-    };
-
-    let data =
-        crate::logs::instance::get_instance(state, &channel, user.as_deref(), false, false, None)
-            .await;
+///
+/// `channel` and `user` are what `extract_value` pulled out of `raw_url`.
+pub async fn mirror_request(
+    state: &Arc<AppState>,
+    raw_url: &str,
+    channel: &str,
+    user: Option<&str>,
+) -> MirrorOutcome {
+    let data = crate::logs::instance::get_instance(state, channel, user, false, false, None).await;
 
     if let Some(error) = data.error {
         return MirrorOutcome::NotFound {
@@ -140,10 +136,11 @@ pub async fn mirror_request(state: &Arc<AppState>, raw_url: &str) -> MirrorOutco
     }
 
     let path = raw_url.split('?').next().unwrap_or(raw_url);
-    let (ranked, lists) = if user.is_some() {
-        (&data.user_logs.instances, &data.user_lists)
+    let ranked = &data.links(user.is_some()).instances;
+    let lists = if user.is_some() {
+        &data.user_lists
     } else {
-        (&data.channel_logs.instances, &data.channel_lists)
+        &data.channel_lists
     };
 
     let source = ranked.clone();

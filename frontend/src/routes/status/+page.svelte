@@ -38,6 +38,11 @@
 
 	const entries = $derived(Object.entries(status?.instances ?? {}));
 	const upCount = $derived(entries.filter(([, info]) => info.up).length);
+	const stats = $derived([
+		{ label: 'Last update', icon: Clock, text: lastText },
+		{ label: 'Next update', icon: RefreshCw, text: nextText },
+		{ label: 'Uptime', icon: Activity, text: uptimeText }
+	]);
 </script>
 
 <svelte:head>
@@ -54,27 +59,15 @@
 	</div>
 
 	<div class="mb-8 grid gap-3 sm:grid-cols-3">
-		<Card class="flex items-center gap-3 p-4!">
-			<Clock class="h-5 w-5 shrink-0 text-accent" />
-			<div class="min-w-0">
-				<p class="text-xs text-fg-subtle">Last update</p>
-				<p class="truncate text-sm font-semibold text-fg">{lastText}</p>
-			</div>
-		</Card>
-		<Card class="flex items-center gap-3 p-4!">
-			<RefreshCw class="h-5 w-5 shrink-0 text-accent" />
-			<div class="min-w-0">
-				<p class="text-xs text-fg-subtle">Next update</p>
-				<p class="truncate text-sm font-semibold text-fg">{nextText}</p>
-			</div>
-		</Card>
-		<Card class="flex items-center gap-3 p-4!">
-			<Activity class="h-5 w-5 shrink-0 text-accent" />
-			<div class="min-w-0">
-				<p class="text-xs text-fg-subtle">Uptime</p>
-				<p class="truncate text-sm font-semibold text-fg">{uptimeText}</p>
-			</div>
-		</Card>
+		{#each stats as stat (stat.label)}
+			<Card class="flex items-center gap-3 p-4!">
+				<stat.icon class="h-5 w-5 shrink-0 text-accent" />
+				<div class="min-w-0">
+					<p class="text-xs text-fg-subtle">{stat.label}</p>
+					<p class="truncate text-sm font-semibold text-fg">{stat.text}</p>
+				</div>
+			</Card>
+		{/each}
 	</div>
 
 	<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">

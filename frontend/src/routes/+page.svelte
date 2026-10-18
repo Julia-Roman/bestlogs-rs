@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { loadMeta, metaState } from '$lib/meta.svelte';
 	import Card from '$lib/components/Card.svelte';
-	import { ArrowRight, ExternalLink } from '@lucide/svelte';
+	import { ArrowRight, ExternalLink, ScrollText } from '@lucide/svelte';
 	import { resolve } from '$app/paths';
 
 	loadMeta();
@@ -24,6 +24,13 @@
 			Best Logs looks across every known logging instance and hands you back the best available
 			result for a channel or user &mdash; nothing is stored here.
 		</p>
+		<a
+			href="https://lurkology.com/logs"
+			class="inline-flex items-center gap-3 rounded-xl bg-brand-600 px-8 py-4 text-lg font-bold text-white shadow-lg shadow-brand-600/25 transition hover:bg-brand-500"
+		>
+			<ScrollText class="h-6 w-6" />
+			Browse logs
+		</a>
 		<div class="flex flex-wrap items-center justify-center gap-3">
 			<a
 				href={resolve('/api')}

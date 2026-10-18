@@ -1,4 +1,5 @@
-// Fully client-rendered SPA: every page fetches its own data at runtime from
-// the Rust backend, so the static build never needs a backend to exist.
+// Every route is prerendered to its own HTML shell, but never server-rendered:
+// pages fetch their data from the Rust backend at runtime, so the static build
+// never needs a backend to exist.
 export const ssr = false;
-export const prerender = false;
+export const prerender = true;

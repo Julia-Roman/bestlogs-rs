@@ -644,8 +644,8 @@ pub async fn get_instance(
             // answer to the question that was actually asked: for a user
             // lookup, channel logs alone would still report "no user logs
             // found" while a slow instance was about to say otherwise.
-            let answered = !channel_ranked.is_empty()
-                && (resolved_user.is_none() || !user_ranked.is_empty());
+            let answered =
+                !channel_ranked.is_empty() && (resolved_user.is_none() || !user_ranked.is_empty());
             if answered && !grace_armed {
                 grace_armed = true;
                 deadline

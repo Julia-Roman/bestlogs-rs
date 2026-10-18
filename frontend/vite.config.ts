@@ -13,11 +13,13 @@ export default defineConfig({
 					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 			},
 
-			// Static SPA build: every route is client-rendered and fetches its data
-			// from the Rust backend at runtime, so the build output is embedded
-			// as-is into the server binary (no prerendering, no backend needed to build).
+			// Every route is prerendered to an HTML shell and client-rendered from
+			// there, so the build output is embedded as-is into the server binary
+			// (no backend needed to build). The fallback can't be `index.html`,
+			// which is the prerendered `/`; it is what the backend serves, with a
+			// 404, for paths that aren't a route.
 			adapter: adapter({
-				fallback: 'index.html'
+				fallback: '404.html'
 			})
 		})
 	],

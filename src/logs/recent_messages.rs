@@ -182,8 +182,15 @@ async fn fetch_backfill(
         if total >= limit {
             break;
         }
-        match fetch_rustlog_day(state, instance_link, channel_id, date, limit - total, first_ts)
-            .await
+        match fetch_rustlog_day(
+            state,
+            instance_link,
+            channel_id,
+            date,
+            limit - total,
+            first_ts,
+        )
+        .await
         {
             Ok(lines) => {
                 total += lines.len();

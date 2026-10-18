@@ -146,9 +146,13 @@ commit) before `nix build`/`nix flake check` will pick them up.
 
 ### Frontend (`frontend/`)
 
-SvelteKit with `adapter-static`, `ssr = false` set repo-wide (`src/routes/+layout.ts`) — every page is fully
-client-rendered and fetches its own data from the backend at runtime via `src/lib/api.ts`, so the static build
-never needs a live backend and the output can be embedded byte-for-byte into the Rust binary.
+SvelteKit with `adapter-static`, `prerender = true` and `ssr = false` set repo-wide (`src/routes/+layout.ts`) —
+every route is prerendered to its own empty HTML shell (`/contact` → `contact.html`) and fully client-rendered
+from there, fetching its own data from the backend at runtime via `src/lib/api.ts`, so the static build never
+needs a live backend and the output can be embedded byte-for-byte into the Rust binary. `static_files.rs` maps
+a route path to its `.html` file and serves the `404.html` SPA fallback (with a 404 status) for anything else;
+the fallback can't be `index.html`, since that is the prerendered `/`. New routes must stay non-dynamic (no
+`[param]` segments) or they won't be prerendered.
 
 - Tailwind v4, CSS-first config in `src/app.css`. Light/dark theming is **not** Tailwind's default
   `prefers-color-scheme` strategy — it's `@custom-variant dark (&:where(.dark, .dark *))` plus semantic color
